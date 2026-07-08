@@ -460,6 +460,8 @@ cd uhotspot && sudo bash usetup.sh
 
 ---
 
+### Daemon Cycle
+
 <table>
   <tr>
     <td style="width: 50%; vertical-align: top;">
@@ -478,14 +480,6 @@ cd uhotspot && sudo bash usetup.sh
         <li><b>backup</b> — append (add-only, never remove) every MAC in <code>mac-hotspot.txt</code> to <code>guest-wellknow.txt</code>; remove from <code>blockdhcp.txt</code> any MAC also in <code>guest-wellknow.txt</code> (protects previously-authenticated clients from being permanently blocked).</li>
         <li><b>reload</b> — compare md5 against baseline, including <code>gracedhcp.txt</code>. If anything changed, invoke <code>SERVER_RELOAD_SCRIPT</code> with a 60s timeout (which runs <code>uleases.sh</code>). If unchanged, nothing is logged — the daemon stays silent on no-op cycles, by design (see LOGS section below). The <code>@hourly</code> cron re-triggers a reload — and therefore grace→block promotion — on idle networks, but only while <code>uhotspotd.service</code> is active (see WARNING below).</li>
       </ol>
-      <br>
-      <b>Client flow</b>: a new client connecting to the SSID receives a pool DHCP lease from <code>pydhcpd</code>. On the daemon's <i>new leases</i> step (every <code>POLL_INTERVAL</code> cycle, not waiting for a separate trigger), <code>uhotspotd</code> scans <code>pydhcpd.leases</code> directly and writes the MAC into <code>gracedhcp.txt</code> with a timestamp — writing that file is what triggers the reload, which then runs <code>uleases.sh</code> to do the actual classification/expiry/blocking. If the client enters a voucher, <code>uhotspotd</code> promotes it to <code>mac-hotspot.txt</code> and assigns a fixed hotspot-range IP. Regardless of subsequent reconnections, once <code>BLOCKDHCP_GRACE_SECONDS</code> elapses without a voucher the MAC is permanently moved to <code>blockdhcp.txt</code>. When a voucher expires, the MAC is released from <code>mac-hotspot.txt</code> and preserved in <code>guest-wellknow.txt</code>; on reconnect <code>uleases.sh</code> recognizes it and keeps the pool lease without starting a new grace timer. The only way out of <code>blockdhcp.txt</code> is manual removal or addition to <code>mac-*</code>.
-      <br><br>
-      <b>The <code>guest-wellknow.txt</code> limbo state</b>: once a MAC is added to <code>guest-wellknow.txt</code> (first voucher authorization), it is never removed automatically — there is no code path that does so. A client whose voucher expired and isn't renewed stays in a permanent state that is neither blocked nor authorized: not in <code>mac-hotspot.txt</code> (no Internet from the firewall), not in <code>gracedhcp.txt</code> (no grace timer, since <code>read_leases</code> skips MACs already in <code>guest-wellknow.txt</code>), and protected from <code>blockdhcp.txt</code> by the backup step. The client only sees UniFi's native captive portal (enforced at the AP level, independent of these Linux ACLs) and can renew with a new voucher at any time. The only way out of this limbo without a new voucher is removing the MAC (or clearing the whole file) from <code>guest-wellknow.txt</code> manually — there is no automatic expiry for this list.
-      <br><br>
-      <b>Record format</b>: <code>a;MAC;IP;HOSTNAME;END_TIME_EPOCH;</code> in <code>mac-hotspot.txt</code>. <code>a;MAC;IP;HOSTNAME;FIRST_SEEN_EPOCH;</code> in <code>gracedhcp.txt</code>. <code>guest-wellknow.txt</code> stores only MAC addresses (one per line) — it is a cumulative whitelist, not an ACL.
-      <br><br>
-      <b>Auth resilience</b>: the CSRF token is extracted from the UniFi OS JWT payload (<code>csrfToken</code> field) after login, and persisted to <code>/run/uhotspotd_session</code> so it survives across <code>$(...)</code> subshell boundaries. On HTTP 401 from any API call, the daemon re-authenticates once and retries automatically.
     </td>
     <td style="width: 50%; vertical-align: top;">
       El daemon ejecuta un ciclo completo cada <code>POLL_INTERVAL</code> segundos (default 20, configurado en <code>uhotspot.conf</code>). Cada ciclo ejecuta doce pasos:
@@ -503,7 +497,24 @@ cd uhotspot && sudo bash usetup.sh
         <li><b>backup</b> — añade (solo agregar, nunca remover) cada MAC de <code>mac-hotspot.txt</code> a <code>guest-wellknow.txt</code>; elimina de <code>blockdhcp.txt</code> cualquier MAC también en <code>guest-wellknow.txt</code> (protege a clientes anteriormente autenticados de ser bloqueados permanentemente).</li>
         <li><b>reload</b> — compara md5 contra baseline, incluyendo <code>gracedhcp.txt</code>. Si algo cambió, invoca <code>SERVER_RELOAD_SCRIPT</code> con timeout de 60s (que a su vez ejecuta <code>uleases.sh</code>). Si no, no se registra nada — el daemon permanece en silencio en los ciclos sin cambios, por diseño (ver sección LOGS más abajo). La entrada <code>@hourly</code> de cron vuelve a disparar un reload — y por ende la promoción gracia→bloqueo — en redes inactivas, pero solo mientras <code>uhotspotd.service</code> esté activo (ver WARNING más abajo).</li>
       </ol>
-      <br>
+    </td>
+  </tr>
+</table>
+
+### Client Flow
+
+<table>
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      <b>Client flow</b>: a new client connecting to the SSID receives a pool DHCP lease from <code>pydhcpd</code>. On the daemon's <i>new leases</i> step (every <code>POLL_INTERVAL</code> cycle, not waiting for a separate trigger), <code>uhotspotd</code> scans <code>pydhcpd.leases</code> directly and writes the MAC into <code>gracedhcp.txt</code> with a timestamp — writing that file is what triggers the reload, which then runs <code>uleases.sh</code> to do the actual classification/expiry/blocking. If the client enters a voucher, <code>uhotspotd</code> promotes it to <code>mac-hotspot.txt</code> and assigns a fixed hotspot-range IP. Regardless of subsequent reconnections, once <code>BLOCKDHCP_GRACE_SECONDS</code> elapses without a voucher the MAC is permanently moved to <code>blockdhcp.txt</code>. When a voucher expires, the MAC is released from <code>mac-hotspot.txt</code> and preserved in <code>guest-wellknow.txt</code>; on reconnect <code>uleases.sh</code> recognizes it and keeps the pool lease without starting a new grace timer. The only way out of <code>blockdhcp.txt</code> is manual removal or addition to <code>mac-*</code>.
+      <br><br>
+      <b>The <code>guest-wellknow.txt</code> limbo state</b>: once a MAC is added to <code>guest-wellknow.txt</code> (first voucher authorization), it is never removed automatically — there is no code path that does so. A client whose voucher expired and isn't renewed stays in a permanent state that is neither blocked nor authorized: not in <code>mac-hotspot.txt</code> (no Internet from the firewall), not in <code>gracedhcp.txt</code> (no grace timer, since <code>read_leases</code> skips MACs already in <code>guest-wellknow.txt</code>), and protected from <code>blockdhcp.txt</code> by the backup step. The client only sees UniFi's native captive portal (enforced at the AP level, independent of these Linux ACLs) and can renew with a new voucher at any time. The only way out of this limbo without a new voucher is removing the MAC (or clearing the whole file) from <code>guest-wellknow.txt</code> manually — there is no automatic expiry for this list.
+      <br><br>
+      <b>Record format</b>: <code>a;MAC;IP;HOSTNAME;END_TIME_EPOCH;</code> in <code>mac-hotspot.txt</code>. <code>a;MAC;IP;HOSTNAME;FIRST_SEEN_EPOCH;</code> in <code>gracedhcp.txt</code>. <code>guest-wellknow.txt</code> stores only MAC addresses (one per line) — it is a cumulative whitelist, not an ACL.
+      <br><br>
+      <b>Auth resilience</b>: the CSRF token is extracted from the UniFi OS JWT payload (<code>csrfToken</code> field) after login, and persisted to <code>/run/uhotspotd_session</code> so it survives across <code>$(...)</code> subshell boundaries. On HTTP 401 from any API call, the daemon re-authenticates once and retries automatically.
+    </td>
+    <td style="width: 50%; vertical-align: top;">
       <b>Flujo del cliente</b>: un cliente nuevo que se conecta al SSID recibe un lease DHCP de pool de <code>pydhcpd</code>. En el paso de <i>clientes nuevos</i> del daemon (cada ciclo de <code>POLL_INTERVAL</code>, sin esperar un disparador aparte), <code>uhotspotd</code> escanea <code>pydhcpd.leases</code> directamente y escribe la MAC en <code>gracedhcp.txt</code> con un timestamp — escribir ese archivo es lo que dispara el reload, que a su vez ejecuta <code>uleases.sh</code> para hacer la clasificación/expiración/bloqueo real. Si el cliente introduce un voucher, <code>uhotspotd</code> lo promueve a <code>mac-hotspot.txt</code> y le asigna una IP fija del rango hotspot. Sin importar las reconexiones posteriores, una vez transcurrido <code>BLOCKDHCP_GRACE_SECONDS</code> sin voucher el MAC pasa permanentemente a <code>blockdhcp.txt</code>. Cuando un voucher expira, la MAC se libera de <code>mac-hotspot.txt</code> y se preserva en <code>guest-wellknow.txt</code>; al reconectarse, <code>uleases.sh</code> la reconoce y mantiene el lease de pool sin iniciar un nuevo contador de gracia. La única salida de <code>blockdhcp.txt</code> es la eliminación manual o su incorporación a <code>mac-*</code>.
       <br><br>
       <b>El estado "limbo" de <code>guest-wellknow.txt</code></b>: una vez que una MAC entra a <code>guest-wellknow.txt</code> (primera autorización con voucher), nunca se remueve automáticamente — no existe ninguna ruta de código que lo haga. Un cliente cuyo voucher expiró y no lo renueva queda en un estado permanente que no es ni bloqueado ni autorizado: no está en <code>mac-hotspot.txt</code> (sin Internet vía firewall), no está en <code>gracedhcp.txt</code> (sin contador de gracia, porque <code>read_leases</code> salta las MACs que ya están en <code>guest-wellknow.txt</code>), y está protegido de <code>blockdhcp.txt</code> por el paso backup. El cliente solo ve el portal cautivo nativo de UniFi (aplicado a nivel del AP, independiente de estas ACLs de Linux) y puede renovar con un voucher nuevo en cualquier momento. La única salida de este limbo sin un voucher nuevo es eliminar la MAC (o vaciar el archivo completo) de <code>guest-wellknow.txt</code> manualmente — no hay expiración automática para esta lista.
@@ -536,7 +547,7 @@ cd uhotspot && sudo bash usetup.sh
   </tr>
 </table>
 
-**Required UniFi ports (hardcoded in `uiptables.sh`) / Puertos UniFi requeridos (hardcodeados en `uiptables.sh`):**
+**Required UniFi ports (hardcoded in `uiptables.sh`):**
 
 | Port / Puerto | Proto | Direction / Dirección | Purpose / Propósito |
 |---|---|---|---|
@@ -575,7 +586,7 @@ cd uhotspot && sudo bash usetup.sh
   </tr>
 </table>
 
-**ACL sources / Fuentes ACL** consumed by uleases:
+**ACL sources** consumed by uleases:
 
 | Path | Role / Rol |
 |---|---|
@@ -585,7 +596,7 @@ cd uhotspot && sudo bash usetup.sh
 | `/etc/acl/acl_dhcp/gracedhcp.txt` | Grace-period clients (hotspot mode only) / Período de gracia (solo modo hotspot) |
 | `/etc/uhotspot/mac-hotspot.txt` | Hotspot — voucher active (read-only) / Hotspot — voucher activo (solo lectura) |
 
-**Entry format / Formato de entrada:**
+**Entry format:**
 
 ```text
 Standard      : a;MAC;IP;HOSTNAME;
@@ -640,7 +651,7 @@ Grace         : a;MAC;IP;HOSTNAME;FIRST_SEEN_EPOCH;
 | `PING_CHECK_ENABLED` | true | Ping IP before OFFER to detect conflicts. Set to `false` in environments with strict ICMP firewall rules |
 | `LEASE_REMOVE_QUEUE` | /etc/uhotspot/leases-remove-queue.txt | Queue file for lease removals |
 
-##### Supported directives / Directivas soportadas
+##### Supported directives
 
 | Directive | Description | Descripción |
 |-----------|-------------|-------------|
@@ -660,7 +671,7 @@ Grace         : a;MAC;IP;HOSTNAME;FIRST_SEEN_EPOCH;
 | `min-lease-time`, `default-lease-time`, `max-lease-time` | Lease duration controls | Control de duración de leases |
 | `option routers`, `option subnet-mask`, `option broadcast-address`, `option domain-name-servers` | Standard DHCP options | Opciones DHCP estándar |
 
-**Warning / Advertencia:**
+**Warning**
 
 <table>
   <tr>
@@ -1055,6 +1066,61 @@ sudo -u uosserver podman exec uosserver curl -v http://192.168.10.2:8880/guest/s
 
 **Optional tunnel:**
 - [Cloudflare Tunnel (start|stop|status) - Zero Trust Activation Recommended](https://raw.githubusercontent.com/maravento/vault/master/scripts/bash/cftunnel.sh)
+
+## NOTICE
+
+---
+
+<table width="100%">
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      <strong>This repository</strong>
+      <ul>
+        <li>May include third-party components.</li>
+        <li>Does not accept Pull Requests. Changes must be proposed via Issues.</li>
+      </ul>
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      <strong>Este repositorio</strong>
+      <ul>
+        <li>Puede incluir componentes de terceros.</li>
+        <li>No acepta Pull Requests. Los cambios deben proponerse mediante Issues.</li>
+      </ul>
+    </td>
+  </tr>
+</table>
+
+## STARGAZERS
+
+---
+
+[![Stargazers](https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=maravento&repo=uhotspot)](https://github.com/maravento/uhotspot/stargazers)
+
+## SPONSOR THIS PROJECT
+
+---
+
+[![Image](https://raw.githubusercontent.com/maravento/winexternal/master/img/maravento-paypal.png)](https://paypal.me/maravento)
+
+## PROJECT LICENSES
+
+---
+
+<table width="100%">
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      This project uses a dual-licensing model to balance software freedom with content protection:
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      Este proyecto utiliza un modelo de licencia dual para equilibrar la libertad del software con la protección del contenido:
+    </td>
+  </tr>
+</table>
+
+| Content | Licensed Under |
+|---|---|
+|Scripts, Binaries, Infrastructure|[![GPL-3.0](https://img.shields.io/badge/Open_Core-GPLv3-blue.svg?style=for-the-badge&labelWidth=120&logoWidth=20)](https://www.gnu.org/licenses/gpl.txt)|
+|RAG, Workers, Specialized Modules, Docs|[![CC](https://img.shields.io/badge/Core_Engine-CC_BY--NC--ND_4.0-lightgrey.svg?style=for-the-badge&labelWidth=120&logoWidth=20)](https://creativecommons.org/licenses/by-nc-nd/4.0/)|
 
 ## DISCLAIMER
 
