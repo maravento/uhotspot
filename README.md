@@ -27,7 +27,7 @@
       <b>What uhotspot does:</b>
       <ul>
         <li>Polls the UniFi Controller API (local account)</li>
-        <li>Reads <code>UNIFI_TYPE</code> from <code>uhotspot.conf</code> (auto-detected at install time by <code>usetup.sh</code>). Only <code>unifi-os</code> controllers (UDM/UDM-Pro/UDR/Cloud Key Gen2+, port 8443/11443, <code>/api/auth/login</code>, <code>TOKEN</code> cookie) are supported by <code>uhotspotd.sh</code>. Classic standalone controllers (<code>/api/login</code>, <code>unifises</code> cookie) are rejected both by the installer and by the daemon at startup — use <code>tools/uaudit.sh</code> for those instead</li>
+        <li>Reads <code>UNIFI_TYPE</code> from <code>uhotspot.conf</code>. <code>usetup.sh</code> auto-detects <code>unifi-os</code> or <code>classic</code> on ports 8443/11443 at install time; if neither responds, it warns and lets you enter the controller URL and type manually — the installer accepts either type. Only <code>unifi-os</code> controllers (UDM/UDM-Pro/UDR/Cloud Key Gen2+, <code>/api/auth/login</code>, <code>TOKEN</code> cookie) are supported by <code>uhotspotd.sh</code>; it is the <b>daemon</b>, not the installer, that rejects <code>classic</code> at startup. Classic standalone controllers (<code>/api/login</code>, <code>unifises</code> cookie) are covered by <code>tools/uaudit.sh</code> instead</li>
         <li>Classifies guest-SSID clients into three states: <i>grace</i> (timer running, no voucher yet), <i>authorized</i> (active voucher), and <i>blocked</i> (grace expired without a voucher)</li>
         <li>Checks that <code>pydhcpd</code> is active on startup and aborts if not running</li>
         <li>Queues <code>dhcpd.leases</code> removals for MACs it manages (consumed by <code>uleases.sh</code> during its safe DHCP stop→modify→start cycle)</li>
@@ -44,7 +44,7 @@
       <b>Lo que uhotspot hace:</b>
       <ul>
         <li>Consulta la API del controlador UniFi (cuenta local)</li>
-        <li>Lee <code>UNIFI_TYPE</code> de <code>uhotspot.conf</code> (auto-detectado durante la instalación por <code>usetup.sh</code>). Solo controladores <code>unifi-os</code> (UDM/UDM-Pro/UDR/Cloud Key Gen2+, puerto 8443/11443, <code>/api/auth/login</code>, cookie <code>TOKEN</code>) están soportados por <code>uhotspotd.sh</code>. Los controladores classic standalone (<code>/api/login</code>, cookie <code>unifises</code>) son rechazados tanto por el instalador como por el daemon al arrancar — use <code>tools/uaudit.sh</code> para esos casos</li>
+        <li>Lee <code>UNIFI_TYPE</code> de <code>uhotspot.conf</code>. <code>usetup.sh</code> autodetecta <code>unifi-os</code> o <code>classic</code> en los puertos 8443/11443 durante la instalación; si ninguno responde, avisa y permite ingresar la URL y el tipo de controlador manualmente — el instalador acepta ambos tipos. Solo los controladores <code>unifi-os</code> (UDM/UDM-Pro/UDR/Cloud Key Gen2+, <code>/api/auth/login</code>, cookie <code>TOKEN</code>) están soportados por <code>uhotspotd.sh</code>; es el <b>daemon</b>, no el instalador, el que rechaza <code>classic</code> al arrancar. Los controladores classic standalone (<code>/api/login</code>, cookie <code>unifises</code>) quedan cubiertos por <code>tools/uaudit.sh</code></li>
         <li>Clasifica los clientes del SSID de invitados en tres estados: <i>gracia</i> (contador activo, sin voucher), <i>autorizados</i> (con voucher activo) y <i>bloqueados</i> (gracia expirada sin voucher)</li>
         <li>Verifica que <code>pydhcpd</code> esté activo en el arranque y aborta si no está corriendo</li>
         <li>Encola remociones de <code>dhcpd.leases</code> para los MACs que gestiona (consumidas por <code>uleases.sh</code> durante su ciclo seguro de detener→modificar→arrancar DHCP)</li>
@@ -368,7 +368,7 @@ The uninstaller offers (each with individual y/N confirmation):
 | `UNIFI_CONTROLLER_URL` | e.g. `https://192.168.1.1:8443` |
 | `UNIFI_USERNAME`, `UNIFI_PASSWORD` | Local UniFi admin |
 | `UNIFI_SITE` | Defaults to `default`; update if the site was renamed |
-| `UNIFI_TYPE` | Must be `unifi-os`; sets the API path (`/proxy/network/api/s/...`). `classic` is rejected by `usetup.sh` and by `uhotspotd.sh` at startup — not supported by this daemon |
+| `UNIFI_TYPE` | Must be `unifi-os` for `uhotspotd.sh`; sets the API path (`/proxy/network/api/s/...`). `usetup.sh` accepts either `unifi-os` or `classic` — it is `uhotspotd.sh` that rejects `classic` at startup (not supported by this daemon; use `tools/uaudit.sh` for classic controllers) |
 | `SERVER_RELOAD_SCRIPT` | Path to `ureload.sh` |
 | `SERV_DHCP` | DHCP server IP (same as `SERVER_IP`; used by `uleases.sh` and `uiptables.sh`) |
 | `SERV_MASK`, `SERV_SUBNET`, `SERV_BROADCAST` | Network mask and derived values |

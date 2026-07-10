@@ -748,7 +748,7 @@ interactive_revoke_by_code() {
         | (.mac | ascii_downcase)
     ' 2>/dev/null | sort -u)
 
-    mapfile -t ALL_MACS < <(printf '%s\n' "${GUEST_MACS[@]}" "${STA_MACS[@]}" | sort -u)
+    mapfile -t ALL_MACS < <(printf '%s\n' "${GUEST_MACS[@]}" "${STA_MACS[@]}" | sort -u | grep -v '^$')
 
     if [ ${#ALL_MACS[@]} -eq 0 ]; then
         log "No client records found linked to code: $TARGET_CODE"

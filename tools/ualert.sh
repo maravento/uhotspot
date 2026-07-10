@@ -202,6 +202,14 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     log "ERROR: $CONFIG_FILE not found — aborting"
     exit 1
 fi
+_owner=$(stat -c '%U' "$CONFIG_FILE" 2>/dev/null)
+_perms=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null)
+_gdigit="${_perms: -2:1}"
+_odigit="${_perms: -1}"
+if [[ "$_owner" != "root" ]] || [[ "$_gdigit" != "0" ]] || [[ "$_odigit" != "0" ]]; then
+    log "ERROR: $CONFIG_FILE has unsafe owner/permissions (owner=$_owner perms=$_perms) — must be owned by root with no group/other access (600)"
+    exit 1
+fi
 source "$CONFIG_FILE"
 
 if [[ -z "${NTFY_TOPIC:-}" ]]; then

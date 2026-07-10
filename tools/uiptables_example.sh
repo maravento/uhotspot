@@ -303,7 +303,7 @@ sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1
 sysctl -w net.ipv6.conf.lo.disable_ipv6=0 >/dev/null 2>&1
 # LAN IPv6
 sysctl -w "net.ipv6.conf.${lan}.disable_ipv6=1" >/dev/null 2>&1
-# ICMPv6 esencial (NDP, SLAAC, Path MTU)
+# Essential ICMPv6 (NDP, SLAAC, Path MTU)
 ip6tables -A OUTPUT -o "$wan" -p ipv6-icmp -j ACCEPT
 # DHCPv6
 ip6tables -A OUTPUT -o "$wan" -p udp --sport 546 --dport 547 -j ACCEPT
@@ -312,12 +312,12 @@ ip6tables -A INPUT -i "$wan" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEP
 
 ## GLOBAL RULES ##
 
-# Global Policies IPv4 (ACCEPT y luego drops explícitos)
+# Global Policies IPv4 (ACCEPT, then explicit drops)
 iptables -P INPUT ACCEPT
 iptables -P FORWARD ACCEPT
 iptables -P OUTPUT ACCEPT
 
-# Global Policies IPv6 (cerrado por defecto)
+# Global Policies IPv6 (closed by default)
 ip6tables -P INPUT DROP
 ip6tables -P FORWARD DROP
 ip6tables -P OUTPUT DROP
@@ -672,7 +672,7 @@ iptables -A FORWARD -i "$lan" -o "$wan" -p icmp -j DROP
 
 ## MAC RULES ##
 
-# MACPROXY (PAC 18100 - Opcion 252 DHCP, HTTP 80 to 3128)
+# MACPROXY (PAC 18100 - DHCP Option 252, HTTP 80 to 3128)
 if ! ipset list macproxy &>/dev/null; then
     ipset create macproxy hash:mac -exist
 else
@@ -687,7 +687,7 @@ for chain in INPUT FORWARD; do
     iptables -A "$chain" -i "$lan" -p tcp -m multiport --dports 18100,3128 -m set --match-set macproxy src -j ACCEPT
 done
 
-# MACHOTSPOT (PAC 18100 - Opcion 252 DHCP, HTTP 80 to 3128)
+# MACHOTSPOT (PAC 18100 - DHCP Option 252, HTTP 80 to 3128)
 if ! ipset list machotspot &>/dev/null; then
     ipset create machotspot hash:mac -exist
 else

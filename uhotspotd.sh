@@ -1100,11 +1100,17 @@ run_cycle() {
     clean_expired_macs
     process_new_leases
 
+    process_sessions
+
+    # Fetched after process_sessions, not before: a voucher redeemed this
+    # cycle is authorized via stat/guest inside process_sessions. A stat/sta
+    # snapshot taken earlier would still show that MAC as unauthorized,
+    # causing revoke_unauthorized (right below) to undo the authorization
+    # in the same cycle it was granted.
     local sta_endpoint sta_data
     sta_endpoint=$(api_path "stat/sta")
     sta_data=$(api_get "$sta_endpoint")
 
-    process_sessions
     revoke_unauthorized    "$sta_data"
     authorize_managed_macs "$sta_data"
     mac_hotspot_backup
