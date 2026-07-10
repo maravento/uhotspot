@@ -907,6 +907,77 @@ Select option [1-5]: 4
   </tr>
 </table>
 
+### ualert
+
+<table>
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      <b>ualert.sh</b> is an <b>optional</b>, standalone alert watcher. It tails <code>/var/log/uhotspot.log</code> in real time and sends a push notification via <a href="https://ntfy.sh">ntfy.sh</a> on two kinds of events: (1) loss of connectivity to the UniFi controller, after <code>API_FAIL_THRESHOLD</code> consecutive cycles (default 3), followed by a recovery notice once it's back; and (2) any other <code>ERROR</code> or <code>WARNING</code> line in the shared log (from <code>uhotspotd.sh</code> or the <code>ureload.sh</code>/<code>uleases.sh</code>/<code>uiptables.sh</code> chain) — fires immediately, no threshold.
+      <br><br>
+      Runs as its own systemd service (<code>ualert.service</code>), independent of <code>uhotspotd.sh</code> — it never reads or modifies the daemon or its source, only tails the log file it already writes. <code>uhotspotd.sh</code> stays byte-identical to upstream whether <code>ualert</code> is installed or not, and the daemon runs the same with or without it.
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      <b>ualert.sh</b> es un vigilante de alertas <b>opcional</b> e independiente. Sigue <code>/var/log/uhotspot.log</code> en tiempo real y envia una notificacion push via <a href="https://ntfy.sh">ntfy.sh</a> ante dos tipos de eventos: (1) perdida de conectividad con el controlador UniFi, tras <code>API_FAIL_THRESHOLD</code> ciclos consecutivos (default 3), seguido de un aviso de recuperacion cuando vuelve; y (2) cualquier otra linea <code>ERROR</code> o <code>WARNING</code> en el log compartido (de <code>uhotspotd.sh</code> o la cadena <code>ureload.sh</code>/<code>uleases.sh</code>/<code>uiptables.sh</code>) -- dispara de inmediato, sin umbral.
+      <br><br>
+      Corre como su propio servicio systemd (<code>ualert.service</code>), independiente de <code>uhotspotd.sh</code> -- nunca lee ni modifica el daemon ni su codigo fuente, solo sigue el archivo de log que ya escribe. <code>uhotspotd.sh</code> se mantiene identico al original este o no instalado <code>ualert</code>, y el daemon funciona igual con o sin el.
+    </td>
+  </tr>
+</table>
+
+**Install:**
+
+```bash
+sudo /etc/uhotspot/tools/ualert.sh install
+```
+
+```text
+==================================
+Installing ualert (uhotspot alert)
+==================================
+
+Added NTFY_TOPIC and API_FAIL_THRESHOLD to /etc/uhotspot/uhotspot.conf
+Deploying script to /etc/uhotspot/tools/ualert.sh...
+Writing systemd unit (/etc/systemd/system/ualert.service)...
+
+✓ Installed and started. Check with: systemctl status ualert
+
+==================================
+ ntfy topic: uhotspot-alert-x7k2m9qv
+==================================
+Install the free 'ntfy' app (Android/iOS) and subscribe to the
+topic above to start receiving alerts on this device.
+```
+
+**Uninstall:**
+
+```bash
+sudo /etc/uhotspot/tools/ualert.sh uninstall
+```
+
+<table>
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      <b>Detection logic / </b> Successful <code>uhotspotd</code> cycles are silent (no log output), so there is no positive "cycle OK" line to anchor on. Instead, <code>ualert.sh</code> anchors on <code>"Could not load vouchers"</code> -- a line <code>load_all_vouchers()</code> logs exactly once per cycle when the controller is unreachable. Two such lines less than <code>POLL_INTERVAL</code> (+10s margin) apart count as consecutive failing cycles; a larger gap means cycles succeeded silently in between, and the streak resets.
+      <br><br>
+      Any other line starting with <code>ERROR:</code> or <code>WARNING:</code> fires immediately, no threshold -- the log already classifies severity (<code>"TIMESTAMP LEVEL: message"</code>), shared by <code>uhotspotd.sh</code> and the <code>ureload.sh</code>/<code>uleases.sh</code>/<code>uiptables.sh</code> chain. Excludes lines already covered by the connectivity streak above (so it still waits for the threshold, not the first failure) and <code>"cycle lock held unexpectedly"</code> (expected, not a bug).
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      <b>Logica de deteccion / </b> Los ciclos exitosos de <code>uhotspotd</code> son silenciosos (sin salida en el log), por lo que no hay una linea positiva de "ciclo OK" en la cual anclarse. En cambio, <code>ualert.sh</code> se ancla en <code>"Could not load vouchers"</code> -- una linea que <code>load_all_vouchers()</code> registra exactamente una vez por ciclo cuando el controlador es inalcanzable. Dos de esas lineas separadas por menos de <code>POLL_INTERVAL</code> (+10s de margen) cuentan como ciclos fallidos consecutivos; un salto mayor implica que hubo ciclos exitosos silenciosos en el medio, y la racha se reinicia.
+      <br><br>
+      Cualquier otra linea que empiece con <code>ERROR:</code> o <code>WARNING:</code> dispara de inmediato, sin umbral -- el log ya clasifica la severidad (<code>"TIMESTAMP NIVEL: mensaje"</code>), compartido entre <code>uhotspotd.sh</code> y la cadena <code>ureload.sh</code>/<code>uleases.sh</code>/<code>uiptables.sh</code>. Excluye las lineas ya cubiertas por la racha de conectividad de arriba (para que siga esperando el umbral, no el primer fallo) y <code>"cycle lock held unexpectedly"</code> (esperado, no es un bug).
+    </td>
+  </tr>
+</table>
+
+**Configuration variables (in `uhotspot.conf`, written automatically by `install`):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NTFY_TOPIC` | *(auto-generated)* | ntfy.sh topic name, e.g. `uhotspot-alert-x7k2m9qv`. Treat as a shared secret — anyone who knows it can publish to it. Never overwritten by a re-install. |
+| `API_FAIL_THRESHOLD` | 3 | Consecutive failing cycles required before sending an alert |
+
+> **Note:** `POLL_INTERVAL` is read from the same `uhotspot.conf` used by `uhotspotd.sh` (falls back to 20 if unset) — no separate configuration needed. / **Nota:** `POLL_INTERVAL` se lee del mismo `uhotspot.conf` que usa `uhotspotd.sh` (default 20 si no esta definido) -- no requiere configuracion aparte.
+
 ## LOGS
 
 ---
