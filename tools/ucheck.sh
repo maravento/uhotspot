@@ -3,7 +3,7 @@
 #
 ################################################################################
 #
-# MAC Address Consistency Checker (uhotspot) — Interactive Menu
+# ucheck - MAC Address Consistency Checker (uhotspot) — Interactive Menu
 #
 # DESCRIPTION:
 #   Diagnostic tool that verifies the presence and consistency of one or more
@@ -85,8 +85,8 @@ fi
 unset _grace _UHOTSPOT_CONF
 BLOCKDHCP_GRACE_SECONDS=${BLOCKDHCP_GRACE_SECONDS:-86400}
 
-# Paths (defaults match the values written by uleases.sh's setup_env() to
-# uleases.env; used as fallback since this script does not source that file)
+# Paths (defaults match uhotspot.conf; used as fallback since this script
+# does not source that file)
 MAC_HOTSPOT="${ACL_MAC_HOTSPOT:-/etc/uhotspot/mac-hotspot.txt}"
 GRACE_DHCP="${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}"
 BLOCK_DHCP="${ACL_BLOCK_FILE:-/etc/acl/acl_dhcp/blockdhcp.txt}"
@@ -187,11 +187,6 @@ check_mac() {
         [ $in_acl -eq 1 ]    && { warn "In blockdhcp AND acl_mac -- should be in one, not both"; warnings=$((warnings+1)); }
         [ $in_grace -eq 1 ]  && { warn "In blockdhcp AND gracedhcp -- contradictory state"; warnings=$((warnings+1)); }
         [ $in_leases -eq 1 ] && { warn "In blockdhcp AND leases -- lease should have been cleared"; warnings=$((warnings+1)); }
-    fi
-
-    if [ $in_acl -eq 1 ] && [ $in_block -eq 1 ]; then
-        warn "In acl_mac AND blockdhcp -- pyleases should have removed it from blockdhcp"
-        warnings=$((warnings+1))
     fi
 
     if [ $in_grace -eq 1 ] && [ $in_leases -eq 0 ]; then
@@ -334,11 +329,6 @@ menu_consistency() {
                 warn "In blockdhcp AND leases -- lease should have been cleared"
                 w=$((w+1))
             fi
-        fi
-        if [ $in_acl -eq 1 ] && [ $in_block -eq 1 ]; then
-            [ $w -eq 0 ] && printf "${WHITE}--- %s ---${NC}\n" "$mac"
-            warn "In acl_mac AND blockdhcp -- pyleases should have removed it from blockdhcp"
-            w=$((w+1))
         fi
         if [ $in_hotspot -eq 1 ] && [ $in_grace -eq 1 ]; then
             [ $w -eq 0 ] && printf "${WHITE}--- %s ---${NC}\n" "$mac"
@@ -494,7 +484,11 @@ menu_unifi_unauthorized() {
         -X POST "$login_url" \
         -H "Content-Type: application/json" \
         --data-binary @- <<< "$payload" 2>/dev/null
-    token=$(grep -i '^set-cookie: TOKEN=' "$hdr" 2>/dev/null | sed -E 's/.*TOKEN=([^;]+).*/\1/' | tr -d '\r\n')
+    if [[ "$UNIFI_TYPE" == "unifi-os" ]]; then
+        token=$(grep -i '^set-cookie: TOKEN=' "$hdr" 2>/dev/null | sed -E 's/.*TOKEN=([^;]+).*/\1/' | tr -d '\r\n')
+    else
+        token=$(grep -i '^set-cookie:' "$hdr" 2>/dev/null | grep -i 'unifises=' | sed -E 's/.*unifises=([^;]+).*/\1/' | tr -d '\r\n')
+    fi
     rm -f "$hdr"
 
     if [[ -z "$token" ]]; then
@@ -503,10 +497,17 @@ menu_unifi_unauthorized() {
         return
     fi
 
+    local cookie_name
+    if [[ "$UNIFI_TYPE" == "unifi-os" ]]; then
+        cookie_name="TOKEN"
+    else
+        cookie_name="unifises"
+    fi
+
     local sta_json
     sta_json=$(mktemp)
     curl -sk --connect-timeout 10 --max-time 30 \
-        -b "TOKEN=${token}" "$sta_url" -o "$sta_json" 2>/dev/null
+        -b "${cookie_name}=${token}" "$sta_url" -o "$sta_json" 2>/dev/null
 
     echo ""
     printf "  ${WHITE}=== Clients on %s NOT authorized by UniFi ===${NC}\n\n" "$HOTSPOT_ESSID"

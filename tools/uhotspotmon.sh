@@ -619,11 +619,9 @@ EOF
     # ============================================================
     # 5. Icon (base64) — UH (UniFi Hotspot) 48x48
     # ============================================================
-    cat > /tmp/uh_icon.gif.b64 << 'ICONEOF'
+    base64 -d > "$MODDIR/images/icon.gif" 2>/dev/null << 'ICONEOF' || true
 R0lGODdhMAAwAIUAAP////v8/vv8/fj6/Ovw9+rv9uPq8+Hn8tfh78LR5rnK4rTH4LLF37DD3qO62aO52aG42IKhy32dyXiZx3eZx3SWxW6Sw22QwmOJvmCHvT5trzpqrTNlqjJkqi5hqCpepyBXox1UoRxToRpSoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAMAAwAEAI+QBHCBxIsKDBgwgTKlzIsGFDDQAiPiB4ISIACgIhSix4IGIBhwQ1Apg4sGJEjCNEkhzYEcBHkDBjypxJs6bNmzgdqqRoEeVOgi1fxoxgEQKHDxMCRFQw8CdLjzmjSp1KtarVq1izLnQ6wuTFjBZXCgwqk6tXnxbTqhUK8oNFBgQlWMQAdiNQqDQzLDAwQACBBBNAhAzLEa/Ww4gTK17MuLHjx5AjS568lXDJnnVHFnZZ1rLAs5nFjiAb0yzmlJ7HGgZp+mRmtWnZOtxg0QFBCxYrhN4s22FLAyIGNrDYYfddzjJDMIAdEYGHpqlHr6ZMvbr169iza5cZEAA7
 ICONEOF
-    base64 -d /tmp/uh_icon.gif.b64 > "$MODDIR/images/icon.gif" 2>/dev/null || true
-    rm -f /tmp/uh_icon.gif.b64
 
     # ============================================================
     # 6. Library (required by Webmin config system)

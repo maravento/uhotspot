@@ -4,7 +4,8 @@
 #  https://github.com/maravento/uhotspot
 #
 #  Modes:
-#    sudo bash usetup.sh             Install (default)
+#    sudo bash usetup.sh             Install (default; aborts if already
+#                                     installed — use --update or --remove)
 #    sudo bash usetup.sh --update    Update scripts only (preserves config/ACLs)
 #    sudo bash usetup.sh --remove    Uninstall
 #    sudo bash usetup.sh --help      Usage
@@ -17,10 +18,13 @@
 #    ./tools/ureload.sh
 #    ./tools/uleases.sh
 #    ./tools/uhotspotmon.sh
+#    ./tools/ualert.sh
+#    ./tools/uwatch.sh
+#    ./tools/uiptables_example.sh
 #
 #  Hard dependencies (checked before anything else; aborts if any is missing —
 #  none of these are auto-installed):
-#    bash, curl, jq, iptables, ipset, cron, apache2
+#    bash, curl, jq, iptables, ipset, cron, python3
 #
 #  Hard dependency NOT an apt package (aborts if missing):
 #    pydhcpd must be installed and running.
@@ -39,6 +43,8 @@ LOGROTATE_FILE="/etc/logrotate.d/uhotspot"
 LOGROTATE_ULEASES_FILE="/etc/logrotate.d/uleases"
 LOGROTATE_UAUDIT_FILE="/etc/logrotate.d/uaudit"
 UAUDIT_LOG_FILE="/var/log/uaudit.log"
+LOGROTATE_UWATCH_FILE="/etc/logrotate.d/uwatch"
+UWATCH_LOG_FILE="/var/log/uwatch.log"
 UIPTABLES_STUB="${TOOLS_DIR}/uiptables.sh"
 SERVICE_DEST="/etc/systemd/system/uhotspotd.service"
 
@@ -49,7 +55,7 @@ REPO_UHOTSPOTD="${SCRIPT_DIR}/uhotspotd.sh"
 REPO_SERVICE="${SCRIPT_DIR}/uhotspotd.service"
 
 # ─── Required apt packages ────────────────────────────────────────────────────
-APT_DEPS=(curl jq iptables ipset cron apache2)
+APT_DEPS=(curl jq iptables ipset cron python3)
 
 # ─── Discovered runtime values (filled during install) ───────────────────────
 DHCP_BACKEND=""    # "pydhcpd"
@@ -61,6 +67,11 @@ warn()  { printf '  \e[33m!\e[0m %s\n'   "$*"; }
 err()   { printf '  \e[31m✗\e[0m %s\n'   "$*" >&2; }
 step()  { printf '\n── %s ─────────────────────────────────────────────\n' "$*"; }
 abort() { err "$*"; exit 1; }
+
+version_ge() {
+    # version_ge A B — returns 0 if version A >= version B
+    [[ "$1" == "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" ]]
+}
 
 confirm() {
     # confirm "prompt" [default y|n]  — returns 0 on yes, 1 on no
@@ -171,7 +182,7 @@ ask_ip() {
             local valid=1
             IFS='.' read -ra octs <<< "$answer"
             for o in "${octs[@]}"; do
-                (( o < 0 || o > 255 )) && valid=0 && break
+                if [[ "$o" =~ ^0[0-9]+$ ]] || (( 10#$o > 255 )); then valid=0; break; fi
             done
             [[ $valid -eq 1 ]] && printf -v "$var" '%s' "$answer" && break
         fi
@@ -297,6 +308,28 @@ run_setup_wizard() {
         done
     fi
 
+    step "Dependency check"
+    # Same "unifi" package (Network app / ace.jar) in both types — classic has
+    # it directly on the host, unifi-os has it inside the uosserver container.
+    local MIN_VERSION_UNIFI="10.4.57"
+    local detected_version min_version="$MIN_VERSION_UNIFI"
+    case "$found_type" in
+        classic)
+            detected_version=$(dpkg-query -W -f='${Version}' unifi 2>/dev/null | cut -d'-' -f1)
+            ;;
+        unifi-os)
+            detected_version=$(sudo -u uosserver podman exec uosserver \
+                dpkg-query -W -f='${Version}' unifi 2>/dev/null | cut -d'-' -f1)
+            ;;
+    esac
+    if [[ -z "$detected_version" ]]; then
+        abort "Could not detect the installed UniFi version (type: ${found_type}). uhotspot only supports versions tested to date — install aborted. Files were already deployed to ${HOTSPOT_DIR}; run 'usetup.sh --remove' before retrying."
+    fi
+    if ! version_ge "$detected_version" "$min_version"; then
+        abort "Detected UniFi version ${detected_version} (${found_type}) is below the minimum tested version ${min_version}. uhotspot only supports ${min_version} and above for this type — install aborted. Files were already deployed to ${HOTSPOT_DIR}; run 'usetup.sh --remove' before retrying."
+    fi
+    info "UniFi version ${detected_version} (${found_type}) meets the minimum tested version (${min_version})"
+
     step "Reload script"
     echo "  Script invoked after every ACL change (must exist and be executable)."
     ask "Path to reload script" "${TOOLS_DIR}/ureload.sh" CFG_RELOAD_SCRIPT
@@ -307,7 +340,8 @@ run_setup_wizard() {
         while true; do
             read -rp "  Subnet mask [$default]: " answer
             answer="${answer:-$default}"
-            if echo "$answer" | grep -qE '^(255|254|252|248|240|224|192|128|0)(\.(255|254|252|248|240|224|192|128|0)){3}$'; then
+            if echo "$answer" | grep -qE '^(255|254|252|248|240|224|192|128|0)(\.(255|254|252|248|240|224|192|128|0)){3}$' \
+                && python3 -c "import ipaddress; ipaddress.IPv4Network('0.0.0.0/${answer}')" 2>/dev/null; then
                 printf -v "$var" '%s' "$answer"; break
             fi
             err "Invalid mask, try again"
@@ -353,6 +387,10 @@ run_setup_wizard() {
     step "Writing $CONFIG_FILE"
     (
         umask 077
+        local ESSID_Q USER_Q PASS_Q
+        ESSID_Q=$(printf '%q' "$CFG_ESSID")
+        USER_Q=$(printf '%q' "$CFG_UNIFI_USER")
+        PASS_Q=$(printf '%q' "$CFG_UNIFI_PASS")
         cat > "$CONFIG_FILE" <<EOF
 # uhotspot — auto-generated by usetup.sh on $(date '+%Y-%m-%d %H:%M:%S')
 # Edit this file to adjust any value.
@@ -369,12 +407,12 @@ HOTSPOT_RANGE_START=${CFG_RANGE_START}
 HOTSPOT_RANGE_END=${CFG_RANGE_END}
 
 # ── Guest SSID ───────────────────────────────────────────────────────────────
-HOTSPOT_ESSID="${CFG_ESSID}"
+HOTSPOT_ESSID=${ESSID_Q}
 
 # ── UniFi Controller ─────────────────────────────────────────────────────────
 UNIFI_CONTROLLER_URL="${found_url}"
-UNIFI_USERNAME="${CFG_UNIFI_USER}"
-UNIFI_PASSWORD="${CFG_UNIFI_PASS}"
+UNIFI_USERNAME=${USER_Q}
+UNIFI_PASSWORD=${PASS_Q}
 # UniFi always creates a site named "default". If the administrator renamed it,
 # edit this value to match the exact site name shown in the UniFi controller.
 UNIFI_SITE="default"
@@ -419,6 +457,7 @@ PING_CHECK_ENABLED="${CFG_PING_CHECK}"
 EOF
     )
     chown root:root "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
     info "Config saved to $CONFIG_FILE (mode 600)"
 }
 
@@ -432,7 +471,11 @@ deploy_directories() {
 
 deploy_scripts() {
     install -m 755 -o root -g root "$REPO_UHOTSPOTD" "${HOTSPOT_DIR}/uhotspotd.sh"
-    install -m 755 -o root -g root "${REPO_TOOLS}/"*.sh "${TOOLS_DIR}/"
+    local f
+    for f in "${REPO_TOOLS}/"*.sh; do
+        [[ "$(basename "$f")" == "uiptables_example.sh" ]] && continue
+        install -m 755 -o root -g root "$f" "${TOOLS_DIR}/"
+    done
     info "Scripts deployed to ${HOTSPOT_DIR}"
 }
 
@@ -504,6 +547,24 @@ EOF
         chmod 644 "$LOGROTATE_UAUDIT_FILE"
         info "logrotate config installed at $LOGROTATE_UAUDIT_FILE"
     fi
+
+    if [[ -f "$LOGROTATE_UWATCH_FILE" ]]; then
+        info "logrotate config already present at $LOGROTATE_UWATCH_FILE"
+    else
+        cat > "$LOGROTATE_UWATCH_FILE" <<EOF
+${UWATCH_LOG_FILE} {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    create 640 root adm
+}
+EOF
+        chown root:root "$LOGROTATE_UWATCH_FILE"
+        chmod 644 "$LOGROTATE_UWATCH_FILE"
+        info "logrotate config installed at $LOGROTATE_UWATCH_FILE"
+    fi
 }
 
 register_cron() {
@@ -553,107 +614,17 @@ install_systemd_service() {
         || warn "Could not start uhotspotd — check: systemctl status uhotspotd"
 }
 
-# ─── Guest portal redirect (Apache) ──────────────────────────────────────────
-# Ports are intentionally hardcoded (not stored in uhotspot.conf): they belong
-# to Apache/uredirect, not to UniFi, which can change its own ports without
-# notice. Documented in README.md. Steps 1-5 below match the exact procedure
-# provided by Alej; step 6 (ss) runs automatically as a non-blocking check;
-# step 7 (curl) is left as a manual test, printed at the end, since it fires
-# a real HTTP request and shouldn't run unattended on every install/update.
-UREDIRECT_LISTEN_PORT=8890
-UREDIRECT_PORTAL_PORT=8880
-UREDIRECT_CONF="/etc/apache2/sites-available/uredirect.conf"
-APACHE_PORTS_CONF="/etc/apache2/ports.conf"
-
-setup_uredirect() {
-    step "Guest portal redirect (Apache)"
-
-    # SERVER_IP already exists in uhotspot.conf (written by the wizard above);
-    # it's not a shell variable in this scope, so read it back from there.
-    local SERVER_IP=""
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
-    if [[ -z "$SERVER_IP" ]]; then
-        warn "SERVER_IP not found in $CONFIG_FILE — cannot configure uredirect vhost"
-        return 0
-    fi
-
-    # 1+2. Create /etc/apache2/sites-available/uredirect.conf
-    cat > "$UREDIRECT_CONF" <<EOF
-<VirtualHost *:${UREDIRECT_LISTEN_PORT}>
-    ServerName ${SERVER_IP}
-    RedirectMatch 302 ^/ http://${SERVER_IP}:${UREDIRECT_PORTAL_PORT}/guest/s/default/
-    ErrorLog  \${APACHE_LOG_DIR}/uredirect_error.log
-    CustomLog \${APACHE_LOG_DIR}/uredirect_access.log combined
-</VirtualHost>
-EOF
-    chown root:root "$UREDIRECT_CONF"
-    chmod 644 "$UREDIRECT_CONF"
-    info "Written $UREDIRECT_CONF"
-
-    # 3. Add Listen directive to ports.conf
-    local listen_line="Listen ${SERVER_IP}:${UREDIRECT_LISTEN_PORT}"
-    if ! grep -qxF "$listen_line" "$APACHE_PORTS_CONF" 2>/dev/null; then
-        echo "$listen_line" >> "$APACHE_PORTS_CONF"
-        info "Added '$listen_line' to $APACHE_PORTS_CONF"
-    else
-        info "Listen directive already present in ports.conf"
-    fi
-
-    # 3a. a2ensite
-    a2ensite uredirect >/dev/null
-
-    # 4. apache2ctl configtest
-    if apache2ctl configtest &>/dev/null; then
-        info "apache2ctl configtest: Syntax OK"
-    else
-        warn "apache2ctl configtest FAILED — uredirect vhost NOT activated. Run 'apache2ctl configtest' to see the error."
-        return 0
-    fi
-
-    # 5. systemctl restart apache2
-    systemctl restart apache2 \
-        && info "apache2 restarted" \
-        || warn "Could not restart apache2 — check: systemctl status apache2"
-
-    # 6. ss verification (non-blocking)
-    if ss -ltnp 2>/dev/null | grep -q "${SERVER_IP}:${UREDIRECT_LISTEN_PORT}"; then
-        info "Verified: apache2 listening on ${SERVER_IP}:${UREDIRECT_LISTEN_PORT}"
-    else
-        warn "Could not verify apache2 is listening on ${SERVER_IP}:${UREDIRECT_LISTEN_PORT}"
-    fi
-
-    # 7. curl — manual test only, not run automatically
-    info "Manual test: curl -v http://${SERVER_IP}:${UREDIRECT_LISTEN_PORT}/foo"
-}
-
-remove_uredirect() {
-    step "Guest portal redirect (Apache)"
-    if [[ ! -f "$UREDIRECT_CONF" ]]; then
-        info "No Apache guest-portal redirect found"
-        return 0
-    fi
-    local SERVER_IP=""
-    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
-    if confirm "Remove Apache guest-portal redirect (uredirect site)?" "y"; then
-        a2dissite uredirect 2>/dev/null || true
-        rm -f "$UREDIRECT_CONF"
-        sed -i "\#^Listen ${SERVER_IP}:${UREDIRECT_LISTEN_PORT}\$#d" "$APACHE_PORTS_CONF" 2>/dev/null || true
-        if command -v apache2ctl &>/dev/null && apache2ctl configtest &>/dev/null; then
-            systemctl restart apache2 2>/dev/null || true
-        fi
-        info "Apache guest-portal redirect removed"
-    else
-        warn "Apache guest-portal redirect preserved"
-    fi
-}
-
 # ─── Install mode ────────────────────────────────────────────────────────────
 do_install() {
     echo ""
     echo "══════════════════════════════════════════════════════"
     echo "  uhotspot — installer"
     echo "══════════════════════════════════════════════════════"
+
+    if [[ -f "${HOTSPOT_DIR}/uhotspotd.sh" ]]; then
+        abort "uhotspot is already installed at ${HOTSPOT_DIR}.
+  Use --update to upgrade (keeps config), or --remove to remove first."
+    fi
 
     step "Preflight"
     check_distro
@@ -671,8 +642,6 @@ do_install() {
 
     step "Systemd service"
     install_systemd_service
-
-    setup_uredirect
 
     step "Cron"
     register_cron
@@ -712,7 +681,6 @@ do_update() {
     mkdir -p "$backup_dir"
     cp -p "${HOTSPOT_DIR}/uhotspotd.sh" "$backup_dir/" 2>/dev/null || true
     cp -p "${TOOLS_DIR}/"*.sh "$backup_dir/" 2>/dev/null || true
-    cp -p "$UREDIRECT_CONF" "$backup_dir/" 2>/dev/null || true
     info "Current scripts backed up to $backup_dir"
 
     step "Deploy updated scripts"
@@ -722,8 +690,6 @@ do_update() {
     install -m 644 -o root -g root "$REPO_SERVICE" "$SERVICE_DEST"
     systemctl daemon-reload
     systemctl restart uhotspotd && info "uhotspotd restarted" || warn "Could not restart uhotspotd — check: systemctl status uhotspotd"
-
-    setup_uredirect
 
     step "Cron"
     register_cron
@@ -737,9 +703,6 @@ do_update() {
     echo "    - ${UIPTABLES_STUB}"
     echo "    - ACL data files (*.txt)"
     echo "    - Logrotate config"
-    echo ""
-    echo "  Replaced:"
-    echo "    - ${UREDIRECT_CONF} (regenerated; previous version backed up)"
     echo ""
     echo "  Cron entries reconciled (missing entries added; existing ones untouched)"
     echo ""
@@ -758,10 +721,9 @@ do_remove() {
 
     echo ""
     echo "  The following actions will be offered (each with confirmation):"
-    echo "    • Remove cron entries pointing to ${HOTSPOT_DIR}/uhotspot.sh and ${HOTSPOT_DIR}/tools/ureload.sh"
+    echo "    • Remove cron entries pointing to ${HOTSPOT_DIR}/tools/ureload.sh"
     echo "    • Remove ${LOGROTATE_FILE}"
-    echo "    • Remove ${UREDIRECT_CONF} (guest portal redirect vhost, if present)"
-    echo "    • Remove ${HOTSPOT_DIR} (includes config.conf, ACLs, uiptables.sh)"
+    echo "    • Remove ${HOTSPOT_DIR} (includes uhotspot.conf, ACLs, uiptables.sh)"
     echo "    • Remove ${LOG_FILE} and rotated logs"
     echo ""
     confirm "Proceed with uninstall?" "n" || { info "Aborted by user."; exit 0; }
@@ -802,12 +764,14 @@ do_remove() {
 
     # Logrotate
     step "Logrotate"
-    for lf in "$LOGROTATE_FILE" "$LOGROTATE_ULEASES_FILE" "$LOGROTATE_UAUDIT_FILE"; do
-        [[ -f "$lf" ]] && rm -f "$lf" && info "Removed $lf" || true
-    done
-    info "Logrotate configs removed"
-
-    remove_uredirect
+    if confirm "Remove logrotate configs (${LOGROTATE_FILE}, ${LOGROTATE_ULEASES_FILE}, ${LOGROTATE_UAUDIT_FILE}, ${LOGROTATE_UWATCH_FILE})?" "y"; then
+        for lf in "$LOGROTATE_FILE" "$LOGROTATE_ULEASES_FILE" "$LOGROTATE_UAUDIT_FILE" "$LOGROTATE_UWATCH_FILE"; do
+            [[ -f "$lf" ]] && rm -f "$lf" && info "Removed $lf" || true
+        done
+        info "Logrotate configs removed"
+    else
+        warn "Logrotate configs preserved"
+    fi
 
     # /etc/uhotspot
     step "$HOTSPOT_DIR"
@@ -859,7 +823,11 @@ usage() {
 Usage: sudo bash $(basename "$0") [OPTION]
 
 Modes:
-  (none)         Install uhotspot (default).
+  (none)         Install uhotspot (default). Aborts if already installed —
+                 use --update or --remove instead. Also aborts if the
+                 detected UniFi Network version (package "unifi", classic
+                 or embedded in unifi-os) is below the minimum tested
+                 (>= 10.4.57).
   --update       Update scripts only (preserves config, ACLs, cron, firewall).
   --remove       Uninstall uhotspot (interactive, with confirmations).
   --help, -h     Show this help.
@@ -884,9 +852,6 @@ preflight() {
         exit 1
     fi
 
-    detect_local_user
-    check_apt_deps
-    detect_dhcp_backend
 }
 
 # ─── Dispatch ────────────────────────────────────────────────────────────────
@@ -902,9 +867,15 @@ main() {
 
     case "${1:-}" in
         ""|install)
+            detect_local_user
+            check_apt_deps
+            detect_dhcp_backend
             do_install
             ;;
         --update|update)
+            detect_local_user
+            check_apt_deps
+            detect_dhcp_backend
             do_update
             ;;
         --remove|remove|--uninstall|uninstall)

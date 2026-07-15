@@ -15,6 +15,15 @@
 #   so that re-authentication inside $(...) subshells propagates correctly to
 #   subsequent API calls in the same cycle.
 #
+#   STARTUP LOGIN (main()):
+#   On startup, retries the initial UniFi login quietly (no ERROR log, no
+#   alert) every 10s for up to STARTUP_GRACE_SECONDS (set in uhotspot.conf,
+#   default 120) before giving up — the controller often boots alongside this
+#   host and isn't ready to answer for the first minute or two. Only exits
+#   (and logs a real ERROR) if the whole grace window elapses without a
+#   successful login. Re-authentication during normal operation (session
+#   expired mid-cycle) is unaffected and still alerts immediately on failure.
+#
 #   MANAGED MACS (optional):
 #   If /etc/acl/acl_mac/mac-*.txt files exist, MACs listed there are treated
 #   as managed corporate devices. They are silently excluded from the guest
@@ -48,19 +57,16 @@
 #                    reconnecting devices are covered automatically
 #  11. BACKUP      — update guest-wellknow.txt, clean blockdhcp conflicts
 #  12. RELOAD      — invoke SERVER_RELOAD_SCRIPT if ACLs changed
+#  13. KICK        — force reassociation of newly-authorized clients still
+#                    connected, so they pick up their new fixed IP right away
 #
-# stat/sta is queried once per cycle and shared across steps 9, 10.
+# stat/sta is queried once per cycle and shared across steps 9, 10, 13.
 #
 # CONFIG:  /etc/uhotspot/uhotspot.conf
 # LOG:     /var/log/uhotspot.log
 # SERVICE: systemctl status uhotspotd
 #
-# TESTED ON:
-#   Ubuntu 24.04.x — UniFi OS Network 10.x
-#
 ################################################################################
-
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 if [ "$(id -u)" != "0" ]; then
     echo "ERROR: must be run as root" >&2
@@ -97,7 +103,7 @@ cleanup_temp() {
     # whatever was last logged instead of opening a delimiter block of its
     # own — a raya must mark the start of a cycle/session, never a shutdown.
     if (( rc != 1 )) && declare -F log_raw &>/dev/null; then
-        log_raw "INFO: uhotspotd done"
+        log_raw "INFO: uhotspotd done at: $(date)"
     fi
 }
 trap cleanup_temp EXIT
@@ -278,6 +284,7 @@ _update_session_from_headers() {
 }
 
 unifi_login() {
+    local quiet="${1:-}"
     local login_url header_file http_code raw_cookie payload
 
     if [[ "$UNIFI_TYPE" == "unifi-os" ]]; then
@@ -304,10 +311,15 @@ unifi_login() {
         -X POST "$login_url" \
         -H "Content-Type: application/json" \
         --data-binary @- \
-        --connect-timeout 10 --max-time 40 <<< "$payload" || echo "000")
+        --connect-timeout 10 --max-time 40 <<< "$payload" 2>/dev/null || true)
+    http_code="${http_code:-000}"
 
     if [[ "$http_code" != "200" ]]; then
-        log "ERROR: UniFi login failed (HTTP $http_code)"
+        if [[ "$quiet" == "quiet" ]]; then
+            log "INFO: UniFi login attempt failed (HTTP $http_code) — still within startup grace window"
+        else
+            log "ERROR: UniFi login failed (HTTP $http_code)"
+        fi
         rm -f "$header_file"
         return 1
     fi
@@ -328,9 +340,13 @@ unifi_login() {
 
     # UniFi OS embeds the CSRF token inside the JWT payload (csrfToken field).
     # Extract it from the second segment of the JWT (base64-encoded JSON).
-    local jwt_payload padded
-    jwt_payload=$(echo "$new_tok" | cut -d'.' -f2)
-    padded="${jwt_payload}$(printf '%0.s=' $(seq 1 $(( (4 - ${#jwt_payload} % 4) % 4 ))))"
+    local jwt_payload pad padded
+    jwt_payload=$(echo "$new_tok" | cut -d'.' -f2 | tr '_-' '/+')
+    pad=$(( (4 - ${#jwt_payload} % 4) % 4 ))
+    padded="$jwt_payload"
+    if (( pad > 0 )); then
+        padded="${jwt_payload}$(printf '%*s' "$pad" '' | tr ' ' '=')"
+    fi
     new_csrf=$(echo "$padded" | base64 -d 2>/dev/null \
         | jq -r '.csrfToken // empty' 2>/dev/null || true)
 
@@ -461,7 +477,7 @@ load_all_vouchers() {
 # ── IP/hostname assignment ────────────────────────────────────────────────────
 get_next_guest_number() {
     local used n=1 max_n
-    max_n=$(( HOTSPOT_RANGE_END - HOTSPOT_RANGE_START + 2 ))
+    max_n=$(( HOTSPOT_RANGE_END - HOTSPOT_RANGE_START + 1 ))
     used=$(grep -oh 'guest[0-9]*' "$MAC_LIST" 2>/dev/null \
         | sed 's/guest//' | sort -n | uniq || true)
     while echo "$used" | grep -q "^${n}$" && (( n <= max_n )); do
@@ -548,6 +564,10 @@ dedup_mac_lists() {
         TEMP_FILES_TO_CLEAN+=("${tmp_block}")
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
+            if [[ "$line" != "a;"* ]]; then
+                echo "$line" >> "$tmp_block"
+                continue
+            fi
             local bmac bip bhostname field_count
             IFS=';' read -r _ bmac bip bhostname _ <<< "$line"
             bmac=$(echo "$bmac" | tr '[:upper:]' '[:lower:]')
@@ -701,7 +721,10 @@ clean_expired_macs() {
         local end_time mac
         end_time=$(echo "$line" | awk -F';' '{print $5}')
         mac=$(echo "$line"      | awk -F';' '{print $2}')
-        if [[ -z "$end_time" ]] || (( now <= end_time )); then
+        if [[ -z "$end_time" ]] || ! [[ "$end_time" =~ ^[0-9]+$ ]]; then
+            [[ -n "$end_time" ]] && log "WARNING: clean_expired_macs: malformed end_time for $mac ($end_time) — keeping entry"
+            echo "$line" >> "$tmp"
+        elif (( now <= end_time )); then
             echo "$line" >> "$tmp"
         else
             log "INFO: Expired $mac at $(date -d "@$end_time" 2>/dev/null || echo "$end_time")"
@@ -885,9 +908,21 @@ revoke_unauthorized() {
     while IFS=';' read -r status mac ip hostname end_time _; do
         [[ "$status" != "a" ]] && continue
         [[ -z "$mac" ]] && continue
+
+        # Skip MACs authorized earlier in this same cycle (process_sessions,
+        # via stat/guest) — UniFi can take a moment to propagate a fresh
+        # voucher authorization into stat/sta, so checking it here right
+        # away can still see a stale authorized=false and revoke what was
+        # just granted, only to re-authorize and kick it again next cycle.
+        local mac_lc="${mac,,}" _nm _skip=0
+        for _nm in "${NEWLY_AUTHORIZED_MACS[@]+"${NEWLY_AUTHORIZED_MACS[@]}"}"; do
+            [[ "${_nm,,}" == "$mac_lc" ]] && { _skip=1; break; }
+        done
+        (( _skip )) && continue
+
         local authorized
         authorized=$(echo "$sta_data" | jq -r \
-            --arg mac "$mac" '
+            --arg mac "$mac_lc" '
             .data[]
             | select((.mac | ascii_downcase) == $mac)
             | .authorized
@@ -986,7 +1021,7 @@ mac_hotspot_backup() {
         merged_macs=$(printf '%s\n%s\n' "$current_macs" "$new_macs" | sort -u)
     fi
 
-    echo "$merged_macs" | grep -v '^$' > "${wellknow_file}.tmp" \
+    { echo "$merged_macs" | grep -v '^$' || true; } > "${wellknow_file}.tmp" \
         && mv "${wellknow_file}.tmp" "$wellknow_file" \
         && chmod 600 "$wellknow_file"
 
@@ -997,8 +1032,9 @@ mac_hotspot_backup() {
         sed 's/.*/;\0;/' "$wellknow_file" > "$pattern_file"
         removed=$(grep -cFf "$pattern_file" "$BLOCK_DHCP" || true)
         if [[ $removed -gt 0 ]]; then
-            grep -vFf "$pattern_file" "$BLOCK_DHCP" > "${BLOCK_DHCP}.tmp" \
-                && mv "${BLOCK_DHCP}.tmp" "$BLOCK_DHCP"
+            { grep -vFf "$pattern_file" "$BLOCK_DHCP" || true; } > "${BLOCK_DHCP}.tmp" \
+                && mv "${BLOCK_DHCP}.tmp" "$BLOCK_DHCP" \
+                && chmod 600 "$BLOCK_DHCP"
             log "WARNING: mac_hotspot_backup: removed $removed entry/entries from blockdhcp.txt"
         fi
         rm -f "$pattern_file"
@@ -1066,8 +1102,22 @@ check_and_reload_if_changed() {
 # DHCP DISCOVER, so it gets the correct IP from the start instead of racing
 # its stale lease against the OS's own connectivity check.
 kick_newly_authorized() {
-    local mac kick_url http_code
+    local sta_data="$1"
+    local mac kick_url http_code on_sta rc
+    rc=$(echo "$sta_data" | jq -r '.meta.rc // empty' 2>/dev/null || true)
     for mac in "${NEWLY_AUTHORIZED_MACS[@]}"; do
+        if [[ "$rc" == "ok" ]]; then
+            on_sta=$(echo "$sta_data" | jq -r --arg mac "$mac" '
+                .data[] | select((.mac | ascii_downcase) == $mac) | "yes"
+            ' 2>/dev/null | head -1 || true)
+            if [[ "$on_sta" != "yes" ]]; then
+                log "INFO: kick_newly_authorized: skipping $mac — not currently connected, no kick needed"
+                continue
+            fi
+        else
+            log "INFO: kick_newly_authorized: stat/sta unavailable — kicking $mac without presence check"
+        fi
+
         kick_url=$(api_path "cmd/stamgr")
         http_code=$(api_post "$kick_url" "{\"cmd\":\"kick-sta\",\"mac\":\"${mac}\"}")
         if [[ "$http_code" == "200" ]]; then
@@ -1127,9 +1177,15 @@ run_cycle() {
         log "INFO: vouchers=$VOUCHER_COUNT | authorized=$authorized_total | grace=$grace_total | new_auth=$SESSIONS_AUTHORIZED | revoked=$REVOKED | managed_authorized=$MANAGED_AUTHORIZED"
 
         if [[ "$_RELOAD_OK" == "1" && ${#NEWLY_AUTHORIZED_MACS[@]} -gt 0 ]]; then
-            kick_newly_authorized
+            kick_newly_authorized "$sta_data"
         fi
     fi
+
+    local _f
+    for _f in "${TEMP_FILES_TO_CLEAN[@]+"${TEMP_FILES_TO_CLEAN[@]}"}"; do
+        rm -f "$_f" 2>/dev/null || true
+    done
+    TEMP_FILES_TO_CLEAN=()
 
     flock -u 201
 }
@@ -1138,15 +1194,41 @@ run_cycle() {
 main() {
     load_config
     POLL_INTERVAL="${POLL_INTERVAL:-20}"
+    STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-120}"
     verify_installation
     init_acl_files
 
     log "INFO: uhotspotd start..."
 
-    if ! unifi_login; then
-        log "ERROR: Initial login failed — retrying in 30s"
-        sleep 30
-        unifi_login || { log "ERROR: Login retry failed — exiting"; exit 1; }
+    # UniFi-OS can take a while to come back up after a reboot — this host and
+    # the controller often boot together. Retry quietly (INFO, no alert) for
+    # up to STARTUP_GRACE_SECONDS before treating it as a real failure; a
+    # controller that's simply still booting should never page anyone.
+    local _login_start _login_elapsed
+    _login_start=$(date +%s)
+    until unifi_login "quiet"; do
+        _login_elapsed=$(( $(date +%s) - _login_start ))
+        if (( _login_elapsed >= STARTUP_GRACE_SECONDS )); then
+            log "ERROR: Could not log in to UniFi after ${STARTUP_GRACE_SECONDS}s — exiting"
+            exit 1
+        fi
+        sleep 10
+    done
+
+    # iptables/ipset state does not survive a reboot, but the ACL files
+    # themselves may be unchanged from before it — check_and_reload_if_changed()
+    # (used inside run_cycle) would then never trigger a reload, leaving the
+    # firewall empty until the next ACL change or the @hourly cron. Force one
+    # reload here, on every daemon start, regardless of ACL state.
+    if [[ -n "${SERVER_RELOAD_SCRIPT:-}" && -x "$SERVER_RELOAD_SCRIPT" ]]; then
+        log "INFO: Startup — invoking $SERVER_RELOAD_SCRIPT to rebuild firewall"
+        export UHOTSPOT_RELOAD_ACTIVE=1
+        if ! timeout 60 "$SERVER_RELOAD_SCRIPT" >/dev/null 2>>"$LOG_FILE"; then
+            log "WARNING: startup reload failed — firewall may be incomplete until next ACL change"
+        fi
+        unset UHOTSPOT_RELOAD_ACTIVE
+    else
+        log "WARNING: SERVER_RELOAD_SCRIPT not set or not executable — firewall not rebuilt at startup"
     fi
 
     while true; do

@@ -17,6 +17,12 @@
 #      POLL_INTERVAL (+ margin) between two failure lines means cycles
 #      succeeded silently in between, and the streak resets. Alerts once
 #      API_FAIL_THRESHOLD consecutive cycles fail, and again once recovered.
+#      Suppressed while uhotspotd.service has been active for less than
+#      STARTUP_GRACE_SECONDS (default 120s) — UniFi Network/UniFi OS can
+#      take a while to come back up after a reboot, and ualert itself
+#      starts at boot too, so the very first cycles would otherwise alert
+#      on a known, expected startup window. A real outage later still
+#      alerts at the normal threshold, unaffected.
 #
 #   2. Any other ERROR or WARNING line — the log already classifies every
 #      line's severity ("TIMESTAMP LEVEL: message"), shared by
@@ -43,10 +49,11 @@
 #     publish to it. https://ntfy.sh
 #
 # CONFIGURATION:
-#   `install` appends NTFY_TOPIC (auto-generated, unpredictable) and
-#   API_FAIL_THRESHOLD=3 to /etc/uhotspot/uhotspot.conf on first run, and
-#   prints the generated topic name so you can subscribe the ntfy app to
-#   it. Never overwrites either value if already present (safe to re-run).
+#   `install` appends NTFY_TOPIC (auto-generated, unpredictable),
+#   API_FAIL_THRESHOLD=3 and STARTUP_GRACE_SECONDS=120 to
+#   /etc/uhotspot/uhotspot.conf on first run, and prints the generated
+#   topic name so you can subscribe the ntfy app to it. Never overwrites
+#   any of them if already present (safe to re-run/upgrade).
 #   To change them later, edit uhotspot.conf directly and restart the
 #   service: systemctl restart ualert
 #   POLL_INTERVAL is read from the same file (falls back to 20 if unset),
@@ -61,7 +68,7 @@
 #                                  ualert.service's ExecStart invokes)
 #   ualert.sh -h, --help          Show this help
 #
-# CONFIG:  /etc/uhotspot/uhotspot.conf   (reads NTFY_TOPIC, API_FAIL_THRESHOLD, POLL_INTERVAL)
+# CONFIG:  /etc/uhotspot/uhotspot.conf   (reads NTFY_TOPIC, API_FAIL_THRESHOLD, STARTUP_GRACE_SECONDS, POLL_INTERVAL)
 # LOG:     /var/log/uhotspot.log         (reads only — shared with uhotspotd.sh)
 # SERVICE: systemctl status ualert
 #
@@ -78,7 +85,7 @@ log() {
 }
 
 usage() {
-    sed -n '2,67p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,74p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -126,11 +133,18 @@ install_module() {
             echo "# ── Alert ─────────────────────────────────────────────────────────────────────"
             echo "NTFY_TOPIC=\"$gen_topic\""
             echo "API_FAIL_THRESHOLD=3"
+            echo "STARTUP_GRACE_SECONDS=120"
         } >> "$CONFIG_FILE"
-        echo "Added NTFY_TOPIC and API_FAIL_THRESHOLD to $CONFIG_FILE"
+        echo "Added NTFY_TOPIC, API_FAIL_THRESHOLD and STARTUP_GRACE_SECONDS to $CONFIG_FILE"
     fi
+    # Insert right after their neighbor in the Alert block (not a plain
+    # >> append) so upgrading an older install doesn't scatter these
+    # variables to the end of the file, past unrelated later sections.
     if ! grep -q '^API_FAIL_THRESHOLD=' "$CONFIG_FILE"; then
-        echo "API_FAIL_THRESHOLD=3" >> "$CONFIG_FILE"
+        sed -i '/^NTFY_TOPIC=/a API_FAIL_THRESHOLD=3' "$CONFIG_FILE"
+    fi
+    if ! grep -q '^STARTUP_GRACE_SECONDS=' "$CONFIG_FILE"; then
+        sed -i '/^API_FAIL_THRESHOLD=/a STARTUP_GRACE_SECONDS=120' "$CONFIG_FILE"
     fi
 
     SELF="$(readlink -f "$0")"
@@ -219,6 +233,7 @@ fi
 
 FAIL_THRESHOLD="${API_FAIL_THRESHOLD:-3}"
 POLL_INTERVAL="${POLL_INTERVAL:-20}"
+STARTUP_GRACE="${STARTUP_GRACE_SECONDS:-120}"
 MARGIN=10   # tolerance added to POLL_INTERVAL so minor cycle jitter doesn't
             # falsely look like a gap with a silent recovery in between
 GAP_LIMIT=$(( POLL_INTERVAL + MARGIN ))
@@ -226,6 +241,18 @@ GAP_LIMIT=$(( POLL_INTERVAL + MARGIN ))
 streak=0
 alerted=0
 last_ts_epoch=0
+
+# Time since uhotspotd.service itself became active (not ualert's own
+# uptime) — UniFi-OS/UniFi Network can take a couple of minutes to come
+# back up after a reboot, and uhotspotd starts failing its cycles
+# immediately, before the controller is ready to answer. Suppressing the
+# alert during this known startup window avoids false alarms without
+# weakening the threshold for a real outage later in the day.
+uhotspotd_started_at() {
+    local ts
+    ts=$(systemctl show -p ActiveEnterTimestamp --value uhotspotd 2>/dev/null)
+    date -d "$ts" +%s 2>/dev/null || echo 0
+}
 
 notify() {
     local msg="$1"
@@ -280,9 +307,15 @@ while true; do
         streak=$(( streak + 1 ))
 
         if (( streak == FAIL_THRESHOLD )) && (( alerted == 0 )); then
-            notify "uhotspot: $streak consecutive failed cycles reaching the controller (since $ts)"
-            log "ALERT: sent — $streak consecutive cycle failures, latest at $ts"
-            alerted=1
+            uhotspotd_start=$(uhotspotd_started_at)
+            if (( uhotspotd_start > 0 )) && (( epoch - uhotspotd_start < STARTUP_GRACE )); then
+                log "INFO: $streak consecutive failures within uhotspotd startup grace window (${STARTUP_GRACE}s) — suppressing alert"
+                streak=0
+            else
+                notify "uhotspot: $streak consecutive failed cycles reaching the controller (since $ts)"
+                log "ALERT: sent — $streak consecutive cycle failures, latest at $ts"
+                alerted=1
+            fi
         fi
     else
         # read timed out: no new failure line for a full GAP_LIMIT window.

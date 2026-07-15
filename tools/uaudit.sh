@@ -3,8 +3,7 @@
 #
 ################################################################################
 #
-# Script      : uaudit.sh
-# Description : UniFi Network Hotspot - Full Client Audit & Management Tool
+# uaudit - UniFi Network Hotspot - Full Client Audit & Management Tool
 #
 # REPORT SECTIONS
 #   1. Authorized  - mac-hotspot.txt enriched with voucher code and status.
@@ -43,8 +42,9 @@
 # TESTED ON    : Ubuntu 24.04 - UniFi OS Network 10.x
 #
 # NOTE on logging:
-# - Writes to /var/log/uaudit.log (append-only, no rotation configured by
-#   this script). Set up logrotate for this file if disk usage matters.
+# - Writes to /var/log/uaudit.log (append-only). Rotation is installed by
+#   usetup.sh (/etc/logrotate.d/uaudit); if running this script standalone
+#   without usetup.sh, set up logrotate for this file yourself.
 # - To clear it manually: truncate -s 0 /var/log/uaudit.log
 #
 ################################################################################
