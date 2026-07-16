@@ -1162,6 +1162,71 @@ sudo /etc/uhotspot/tools/ualert.sh uninstall
 >
 > `POLL_INTERVAL` se lee del mismo `uhotspot.conf` que usa `uhotspotd.sh` (default 20 si no esta definido) -- no requiere configuracion aparte.
 
+### uwatch
+
+<table>
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      <b>uwatch.sh</b> is an <b>optional</b>, standalone services watchdog. Runs every 5 minutes via cron and checks every service <code>uhotspot</code> depends on, restarting whichever is down: <code>uhotspotd.service</code> (always), <code>ualert.service</code> (only if installed), and the UniFi backend (<code>uosserver.service</code> for <code>UNIFI_TYPE=unifi-os</code>, or <code>unifi.service</code> for <code>classic</code>). Each check is fully independent — one check's failure never skips or blocks the others in the same run.
+      <br><br>
+      Standalone — never reads or modifies <code>uhotspotd.sh</code>, only manages services via <code>systemctl</code>. Writes to the same shared <code>/var/log/uhotspot.log</code> as the rest of <code>uhotspot</code> (no separate log file or logrotate of its own). Silent on a healthy run — nothing is logged unless a check finds a problem or takes a fix action.
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      <b>uwatch.sh</b> es un vigilante de servicios <b>opcional</b> e independiente. Corre cada 5 minutos por cron y verifica cada servicio del que depende <code>uhotspot</code>, reiniciando el que esté caído: <code>uhotspotd.service</code> (siempre), <code>ualert.service</code> (solo si está instalado), y el backend de UniFi (<code>uosserver.service</code> para <code>UNIFI_TYPE=unifi-os</code>, o <code>unifi.service</code> para <code>classic</code>). Cada chequeo es completamente independiente — el fallo de uno nunca salta ni bloquea a los demás en la misma corrida.
+      <br><br>
+      Independiente — nunca lee ni modifica <code>uhotspotd.sh</code>, solo gestiona servicios vía <code>systemctl</code>. Escribe al mismo <code>/var/log/uhotspot.log</code> compartido con el resto de <code>uhotspot</code> (sin log ni logrotate propio). Silencioso en una corrida sana — no registra nada salvo que un chequeo encuentre un problema o tome una acción de reparación.
+    </td>
+  </tr>
+</table>
+
+**Install:**
+
+```bash
+sudo /etc/uhotspot/tools/uwatch.sh install
+```
+
+```text
+==================================
+Installing uwatch (uhotspot services watchdog)
+==================================
+
+Deploying script to /etc/uhotspot/tools/uwatch.sh...
+Cron entry registered: */5 * * * * /etc/uhotspot/tools/uwatch.sh
+
+✓ Installed. First run happens on the next 5-minute mark.
+  Check the log with: tail -f /var/log/uhotspot.log
+```
+
+**Uninstall:**
+
+```bash
+sudo /etc/uhotspot/tools/uwatch.sh uninstall
+```
+
+<table>
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      <b>UniFi backend check:</b> a plain <code>systemctl is-active</code> only proves the process is up, not that the application itself is healthy — the container's (or subprocess's) embedded MongoDB can fail to come up while the process keeps running, leaving every real API call broken. So once the service is confirmed active, <code>uwatch.sh</code> performs the same real login <code>uhotspotd.sh</code> itself relies on (<code>UNIFI_USERNAME</code>/<code>UNIFI_PASSWORD</code> from <code>uhotspot.conf</code>, credentials via <code>jq</code> env and payload via <code>curl</code> stdin — never in argv). <code>HTTP 200</code> = healthy. <code>HTTP 000</code> (unreachable) or <code>5xx</code> (server error) = unresponsive, restarts the service. Any <code>4xx</code> means credentials were rejected but the service itself answered — logged as a warning, <b>no restart</b> (a restart doesn't fix a wrong password in <code>uhotspot.conf</code>, and could trigger UniFi's own login rate-limiting). If <code>UNIFI_USERNAME</code>/<code>UNIFI_PASSWORD</code> aren't set, falls back to a process/port-only check instead of skipping it.
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      <b>Chequeo del backend UniFi:</b> un simple <code>systemctl is-active</code> solo prueba que el proceso está arriba, no que la aplicación esté sana — el MongoDB embebido del contenedor (o subproceso) puede fallar al iniciar mientras el proceso sigue corriendo, dejando rota cualquier llamada real a la API. Por eso, una vez confirmado que el servicio está activo, <code>uwatch.sh</code> hace el mismo login real que usa <code>uhotspotd.sh</code> (<code>UNIFI_USERNAME</code>/<code>UNIFI_PASSWORD</code> de <code>uhotspot.conf</code>, credenciales vía env de <code>jq</code> y payload vía stdin de <code>curl</code> — nunca en argv). <code>HTTP 200</code> = sano. <code>HTTP 000</code> (inalcanzable) o <code>5xx</code> (error de servidor) = no responde, reinicia el servicio. Cualquier <code>4xx</code> significa que las credenciales fueron rechazadas pero el servicio sí respondió — se registra como advertencia, <b>sin reiniciar</b> (un reinicio no corrige una contraseña mal escrita en <code>uhotspot.conf</code>, y podría activar el rate-limiting de login de UniFi). Si <code>UNIFI_USERNAME</code>/<code>UNIFI_PASSWORD</code> no están configuradas, cae de vuelta a un chequeo de solo proceso/puerto en vez de omitirlo.
+    </td>
+  </tr>
+</table>
+
+**Wrong password / Contraseña incorrecta:**
+
+```text
+2026-07-15 17:21:03 WARNING: credentials rejected (HTTP 403)
+2026-07-15 17:21:03 Check uhotspot.conf - UOS itself is responding
+```
+
+**Normal operation / Operación normal:**
+
+```text
+(nothing — a healthy run writes no log lines / nada — una corrida sana no escribe líneas de log)
+```
+
 ## LOGS
 
 ---

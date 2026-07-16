@@ -43,8 +43,6 @@ LOGROTATE_FILE="/etc/logrotate.d/uhotspot"
 LOGROTATE_ULEASES_FILE="/etc/logrotate.d/uleases"
 LOGROTATE_UAUDIT_FILE="/etc/logrotate.d/uaudit"
 UAUDIT_LOG_FILE="/var/log/uaudit.log"
-LOGROTATE_UWATCH_FILE="/etc/logrotate.d/uwatch"
-UWATCH_LOG_FILE="/var/log/uwatch.log"
 UIPTABLES_STUB="${TOOLS_DIR}/uiptables.sh"
 SERVICE_DEST="/etc/systemd/system/uhotspotd.service"
 
@@ -547,24 +545,6 @@ EOF
         chmod 644 "$LOGROTATE_UAUDIT_FILE"
         info "logrotate config installed at $LOGROTATE_UAUDIT_FILE"
     fi
-
-    if [[ -f "$LOGROTATE_UWATCH_FILE" ]]; then
-        info "logrotate config already present at $LOGROTATE_UWATCH_FILE"
-    else
-        cat > "$LOGROTATE_UWATCH_FILE" <<EOF
-${UWATCH_LOG_FILE} {
-    daily
-    rotate 7
-    compress
-    missingok
-    notifempty
-    create 640 root adm
-}
-EOF
-        chown root:root "$LOGROTATE_UWATCH_FILE"
-        chmod 644 "$LOGROTATE_UWATCH_FILE"
-        info "logrotate config installed at $LOGROTATE_UWATCH_FILE"
-    fi
 }
 
 register_cron() {
@@ -764,8 +744,8 @@ do_remove() {
 
     # Logrotate
     step "Logrotate"
-    if confirm "Remove logrotate configs (${LOGROTATE_FILE}, ${LOGROTATE_ULEASES_FILE}, ${LOGROTATE_UAUDIT_FILE}, ${LOGROTATE_UWATCH_FILE})?" "y"; then
-        for lf in "$LOGROTATE_FILE" "$LOGROTATE_ULEASES_FILE" "$LOGROTATE_UAUDIT_FILE" "$LOGROTATE_UWATCH_FILE"; do
+    if confirm "Remove logrotate configs (${LOGROTATE_FILE}, ${LOGROTATE_ULEASES_FILE}, ${LOGROTATE_UAUDIT_FILE})?" "y"; then
+        for lf in "$LOGROTATE_FILE" "$LOGROTATE_ULEASES_FILE" "$LOGROTATE_UAUDIT_FILE"; do
             [[ -f "$lf" ]] && rm -f "$lf" && info "Removed $lf" || true
         done
         info "Logrotate configs removed"

@@ -615,9 +615,7 @@ server-identifier $SERV_DHCP;
 deny duplicates;
 one-lease-per-client true;
 deny declines;
-deny client-updates;
 $ping_check_line
-ddns-update-style none;
         " >"$dhcp_conf_temp"
 
         shopt -s nullglob
@@ -687,7 +685,6 @@ class "blockdhcp" {
         echo "subnet $SERV_SUBNET netmask $SERV_MASK {
     $wpad_subnet
     option routers $SERV_DHCP;
-    option subnet-mask $SERV_MASK;
     option broadcast-address $SERV_BROADCAST;
     #option domain-name \"example.org\";
     option domain-name-servers $SERV_DNS;
