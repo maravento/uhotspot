@@ -42,15 +42,15 @@
 # TESTED ON    : Ubuntu 24.04 - UniFi OS Network 10.x
 #
 # NOTE on logging:
-# - Writes to /var/log/uaudit.log (append-only). Rotation is installed by
-#   usetup.sh (/etc/logrotate.d/uaudit); if running this script standalone
-#   without usetup.sh, set up logrotate for this file yourself.
-# - To clear it manually: truncate -s 0 /var/log/uaudit.log
+# - Manual/interactive script, not a daemon: /var/log/uaudit.log is truncated
+#   at the start of every run, so it always reflects only the latest audit.
+#   No rotation is needed or installed for this file.
 #
 ################################################################################
 
 # logging
 log_file="/var/log/uaudit.log"
+: > "$log_file" 2>/dev/null || true
 log() {
     local msg="$1"
     echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" | tee -a "$log_file" 2>/dev/null || true

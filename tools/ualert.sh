@@ -236,7 +236,8 @@ POLL_INTERVAL="${POLL_INTERVAL:-20}"
 STARTUP_GRACE="${STARTUP_GRACE_SECONDS:-120}"
 MARGIN=10   # tolerance added to POLL_INTERVAL so minor cycle jitter doesn't
             # falsely look like a gap with a silent recovery in between
-GAP_LIMIT=$(( POLL_INTERVAL + MARGIN ))
+API_MAX_TIME=30   # matches curl --max-time in uhotspotd.sh's api_get calls
+GAP_LIMIT=$(( POLL_INTERVAL + 3 * API_MAX_TIME + MARGIN ))
 
 streak=0
 alerted=0

@@ -40,9 +40,6 @@ TOOLS_DIR="${HOTSPOT_DIR}/tools"
 CONFIG_FILE="${HOTSPOT_DIR}/uhotspot.conf"
 LOG_FILE="/var/log/uhotspot.log"
 LOGROTATE_FILE="/etc/logrotate.d/uhotspot"
-LOGROTATE_ULEASES_FILE="/etc/logrotate.d/uleases"
-LOGROTATE_UAUDIT_FILE="/etc/logrotate.d/uaudit"
-UAUDIT_LOG_FILE="/var/log/uaudit.log"
 UIPTABLES_STUB="${TOOLS_DIR}/uiptables.sh"
 SERVICE_DEST="/etc/systemd/system/uhotspotd.service"
 
@@ -188,6 +185,19 @@ ask_ip() {
     done
 }
 
+ask_number() {
+    local prompt="$1" default="$2" var="$3" answer
+    while true; do
+        read -rp "  ${prompt} [${default}]: " answer
+        answer="${answer:-$default}"
+        if [[ "$answer" =~ ^[0-9]+$ ]] && (( answer >= 1 )); then
+            printf -v "$var" '%s' "$answer"
+            break
+        fi
+        err "'$answer' is not valid. Enter a positive integer."
+    done
+}
+
 ask_octet() {
     local prompt="$1" default="$2" var="$3" ref_start="${4:-0}" answer
     while true; do
@@ -203,6 +213,12 @@ ask_octet() {
         fi
         err "'$answer' is not valid. Enter a number between 1 and 254."
     done
+}
+
+# Returns 0 (true) if octet ranges [s1,e1] and [s2,e2] intersect.
+ranges_overlap() {
+    local s1="$1" e1="$2" s2="$3" e2="$4"
+    (( s1 <= e2 && s2 <= e1 ))
 }
 
 # ─── UniFi controller discovery ──────────────────────────────────────────────
@@ -277,8 +293,16 @@ run_setup_wizard() {
     step "Hotspot IP range"
     CFG_IP_RANGE=$(echo "$CFG_SERVER_IP" | cut -d'.' -f1-3)
     echo "  Hotspot IP range base (auto-detected): $CFG_IP_RANGE"
-    ask_octet "Range start (last octet)" "160" CFG_RANGE_START
-    ask_octet "Range end   (last octet)" "199" CFG_RANGE_END "$CFG_RANGE_START"
+    local server_octet="${CFG_SERVER_IP##*.}"
+    while true; do
+        ask_octet "Range start (last octet)" "160" CFG_RANGE_START
+        ask_octet "Range end   (last octet)" "199" CFG_RANGE_END "$CFG_RANGE_START"
+        if (( server_octet >= CFG_RANGE_START && server_octet <= CFG_RANGE_END )); then
+            err "Range ${CFG_RANGE_START}-${CFG_RANGE_END} includes the server's own IP (.${server_octet}). Choose a different range."
+            continue
+        fi
+        break
+    done
 
     step "Hotspot SSID"
     ask "Guest SSID name (must match exactly in UniFi)" "" CFG_ESSID
@@ -357,15 +381,26 @@ run_setup_wizard() {
     local NET_BASE
     NET_BASE="${CFG_SERVER_IP%.*}"
     echo "  These IPs are assigned temporarily to clients not yet in any ACL list."
-    ask_octet "Pool start (last octet)" "230" CFG_POOL_START
-    ask_octet "Pool end   (last octet)" "239" CFG_POOL_END "$CFG_POOL_START"
+    while true; do
+        ask_octet "Pool start (last octet)" "230" CFG_POOL_START
+        ask_octet "Pool end   (last octet)" "239" CFG_POOL_END "$CFG_POOL_START"
+        if ranges_overlap "$CFG_POOL_START" "$CFG_POOL_END" "$CFG_RANGE_START" "$CFG_RANGE_END"; then
+            err "Pool ${CFG_POOL_START}-${CFG_POOL_END} overlaps the hotspot range (${CFG_RANGE_START}-${CFG_RANGE_END}). Choose a different pool."
+            continue
+        fi
+        if (( server_octet >= CFG_POOL_START && server_octet <= CFG_POOL_END )); then
+            err "Pool ${CFG_POOL_START}-${CFG_POOL_END} includes the server's own IP (.${server_octet}). Choose a different pool."
+            continue
+        fi
+        break
+    done
     CFG_SERV_INI_RANGE_BLOCK="${NET_BASE}.${CFG_POOL_START}"
     CFG_SERV_END_RANGE_BLOCK="${NET_BASE}.${CFG_POOL_END}"
 
     step "Timers"
-    ask "Daemon poll interval in seconds (POLL_INTERVAL)" "20" CFG_POLL_INTERVAL
-    ask "DHCP pool lease cleanup interval in seconds (CLEANUP_INTERVAL)" "60" CFG_CLEANUP_INTERVAL
-    ask "Grace period before blocking unknown MACs in seconds (BLOCKDHCP_GRACE_SECONDS)" "86400" CFG_GRACE_SECONDS
+    ask_number "Daemon poll interval in seconds (POLL_INTERVAL)" "20" CFG_POLL_INTERVAL
+    ask_number "DHCP pool lease cleanup interval in seconds (CLEANUP_INTERVAL)" "60" CFG_CLEANUP_INTERVAL
+    ask_number "Grace period before blocking unknown MACs in seconds (BLOCKDHCP_GRACE_SECONDS)" "86400" CFG_GRACE_SECONDS
 
     step "Optional features"
     local CFG_WPAD_ENABLED="false"
@@ -524,26 +559,6 @@ EOF
         chown root:root "$LOGROTATE_FILE"
         chmod 644 "$LOGROTATE_FILE"
         info "logrotate config installed at $LOGROTATE_FILE"
-    fi
-
-
-    if [[ -f "$LOGROTATE_UAUDIT_FILE" ]]; then
-        info "logrotate config already present at $LOGROTATE_UAUDIT_FILE"
-    else
-        cat > "$LOGROTATE_UAUDIT_FILE" <<EOF
-${UAUDIT_LOG_FILE} {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-}
-EOF
-        chown root:root "$LOGROTATE_UAUDIT_FILE"
-        chmod 644 "$LOGROTATE_UAUDIT_FILE"
-        info "logrotate config installed at $LOGROTATE_UAUDIT_FILE"
     fi
 }
 
@@ -744,11 +759,9 @@ do_remove() {
 
     # Logrotate
     step "Logrotate"
-    if confirm "Remove logrotate configs (${LOGROTATE_FILE}, ${LOGROTATE_ULEASES_FILE}, ${LOGROTATE_UAUDIT_FILE})?" "y"; then
-        for lf in "$LOGROTATE_FILE" "$LOGROTATE_ULEASES_FILE" "$LOGROTATE_UAUDIT_FILE"; do
-            [[ -f "$lf" ]] && rm -f "$lf" && info "Removed $lf" || true
-        done
-        info "Logrotate configs removed"
+    if confirm "Remove logrotate config (${LOGROTATE_FILE})?" "y"; then
+        [[ -f "$LOGROTATE_FILE" ]] && rm -f "$LOGROTATE_FILE" && info "Removed $LOGROTATE_FILE" || true
+        info "Logrotate config removed"
     else
         warn "Logrotate configs preserved"
     fi

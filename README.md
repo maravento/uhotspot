@@ -394,7 +394,7 @@ sudo bash usetup.sh --remove
 | Grace-period clients (no voucher yet) | Clientes en período de gracia | `/etc/acl/acl_dhcp/gracedhcp.txt` |
 | Authorized clients (active voucher) | Autorizados | `/etc/uhotspot/mac-hotspot.txt` |
 | Cumulative MAC backup (one MAC per line) | Backup acumulativo de MACs | `/etc/uhotspot/guest-wellknow.txt` |
-| Lease removal queue (consumed by uleases.sh) | Cola de remociones de leases | `/etc/uhotspot/leases-remove-queue.txt` |
+| Lease removal queue — internal working file for `uhotspotd.sh`/`uleases.sh`, not a config variable or ACL; do not edit manually | Cola de remociones de leases — archivo de trabajo interno de `uhotspotd.sh`/`uleases.sh`, no es variable de configuración ni ACL; no debe editarse manualmente | `/etc/uhotspot/leases-remove-queue.txt` |
 | Log file (unified) | Archivo de log (unificado) | `/var/log/uhotspot.log` |
 | Logrotate config | Config de logrotate | `/etc/logrotate.d/uhotspot` |
 | Webmin log viewer module | Módulo visor de log para Webmin | `/etc/uhotspot/tools/uhotspotmon.sh` |
@@ -789,7 +789,6 @@ Grace         : a;MAC;IP;HOSTNAME;FIRST_SEEN_EPOCH;
 | `AUTHORIZED_LEASE_TIME` | 2592000 | Lease duration for authorized clients (30 days) | Duración del lease para clientes autorizados (30 días) |
 | `WPAD_ENABLED` | false | Enable WPAD/PAC via DHCP option 252 | Habilitar WPAD/PAC vía la opción DHCP 252 |
 | `PING_CHECK_ENABLED` | true | Ping IP before OFFER to detect conflicts. Set to `false` in environments with strict ICMP firewall rules | Hacer ping a la IP antes del OFFER para detectar conflictos. Configurar en `false` en entornos con reglas de firewall ICMP estrictas |
-| `LEASE_REMOVE_QUEUE` | /etc/uhotspot/leases-remove-queue.txt | Queue file for lease removals | Archivo de cola para remociones de leases |
 
 > Variables marked as (auto) are calculated automatically from `SERV_DHCP` and `SERV_MASK`. Variables marked as (required) are prompted during `usetup.sh` installation. All other variables have sensible defaults and can be modified directly in `uhotspot.conf`.
 >
@@ -829,13 +828,13 @@ Grace         : a;MAC;IP;HOSTNAME;FIRST_SEEN_EPOCH;
     <td style="width: 50%; vertical-align: top;">
       <b>uaudit.sh</b> — Authenticates against UniFi OS ( <code>/api/auth/login</code>) by default, or classic controllers ( <code>/api/login</code>) when <code>UNIFI_TYPE=classic</code>, and pulls three datasets: <code>stat/sta</code> (live clients), <code>stat/guest</code> (voucher-redeemed guests), and <code>stat/voucher</code> (full voucher inventory). Cross-references them against <code>mac-hotspot.txt</code>, then prints a two-section report (Authorized, Vouchers) and offers five interactive cleanup actions. <br>
       <br>
-      Logs to <code>/etc/uhotspot/uaudit.log</code>. <br>
+      Logs to <code>/var/log/uaudit.log</code>. <br>
       <br> Reads credentials from <code>/etc/uhotspot/uhotspot.conf</code>. Required variables: <code>UNIFI_CONTROLLER_URL</code>, <code>UNIFI_USERNAME</code>, <code>UNIFI_PASSWORD</code>, <code>HOTSPOT_ESSID</code>. Optional: <code>UNIFI_SITE</code> (defaults to <code>default</code>).
     </td>
     <td style="width: 50%; vertical-align: top;">
       <b>uaudit.sh</b> — Se autentica contra UniFi OS ( <code>/api/auth/login</code>) por defecto, o contra controladores classic ( <code>/api/login</code>) cuando <code>UNIFI_TYPE=classic</code>, y consulta tres datasets: <code>stat/sta</code> (clientes en vivo), <code>stat/guest</code> (invitados con voucher canjeado), y <code>stat/voucher</code> (inventario completo de vouchers). Los cruza contra <code>mac-hotspot.txt</code>, imprime un reporte de dos secciones (Autorizados, Vouchers) y ofrece cinco acciones interactivas de limpieza. <br>
       <br>
-      Registra en <code>/etc/uhotspot/uaudit.log</code>. <br>
+      Registra en <code>/var/log/uaudit.log</code>. <br>
       <br> Lee las credenciales de <code>/etc/uhotspot/uhotspot.conf</code>. Variables requeridas: <code>UNIFI_CONTROLLER_URL</code>, <code>UNIFI_USERNAME</code>, <code>UNIFI_PASSWORD</code>, <code>HOTSPOT_ESSID</code>. Opcional: <code>UNIFI_SITE</code> (default <code>default</code>).
     </td>
   </tr>
@@ -866,10 +865,10 @@ UniFi Clients Audit - starting, please wait...
 =======================================================================
  AUTHORIZED — mac-hotspot.txt
 =======================================================================
-MAC                IP              VOUCHER     EXPIRES      CONNECTED
-02:00:00:aa:bb:01  192.168.20.101  0000000001  08-02 15:04  NO
-02:00:00:aa:bb:02  192.168.20.102  0000000001  08-02 15:04  NO
-02:00:00:aa:bb:03  192.168.20.103  0000000002  08-02 16:20  YES
+MAC                IP              CODE        STATUS  EXPIRES      ON
+02:00:00:aa:bb:01  192.168.20.101  0000000001  MULTI   08-02 15:04  NO
+02:00:00:aa:bb:02  192.168.20.102  0000000001  MULTI   08-02 15:04  NO
+02:00:00:aa:bb:03  192.168.20.103  0000000002  VALID   08-02 16:20  YES
 =======================================================================
  VOUCHERS — stat/voucher
 =======================================================================
@@ -877,7 +876,7 @@ CODE        STATUS        DURATION  QUOTA  USED  EXPIRES
 0000000002  USED_MULTIPL  2160h     5      2     08-02 21:17
 0000000001  USED_MULTIPL  2160h     6      5     07-29 18:59
 
-Audit complete. Log saved to: /etc/uhotspot/uaudit.log
+Audit complete. Log saved to: /var/log/uaudit.log
 
 =======================================================================
  AVAILABLE ACTIONS
@@ -897,22 +896,24 @@ Audit complete. Log saved to: /etc/uhotspot/uaudit.log
 <table>
   <tr>
     <td style="width: 50%; vertical-align: top;">
-      <b>ucheck.sh</b> -- Interactive diagnostic tool that verifies the presence and consistency of MAC addresses across every DHCP/ACL data source used by <code>pydhcpd</code> and <code>uhotspot</code>: <code>mac-hotspot.txt</code>, <code>gracedhcp.txt</code>, <code>blockdhcp.txt</code>, <code>acl_mac/*.txt</code> and <code>pydhcpd.leases</code>. Launched with no arguments, it presents a menu with four operations:
+      <b>ucheck.sh</b> -- Interactive diagnostic tool that verifies the presence and consistency of MAC addresses across every DHCP/ACL data source used by <code>pydhcpd</code> and <code>uhotspot</code>: <code>mac-hotspot.txt</code>, <code>gracedhcp.txt</code>, <code>blockdhcp.txt</code>, <code>acl_mac/*.txt</code>, <code>pydhcpd.leases</code> and (for option 5) the UniFi controller's <code>stat/sta</code>. Launched with no arguments, it presents a menu with five operations:
       <ul>
         <li><b>Check MAC</b> -- inspect a single MAC across all data sources and flag contradictory states (e.g. a MAC present in both <code>blockdhcp</code> and <code>acl_mac</code>). When the MAC is in the grace period, it also prints the remaining time before promotion to <code>blockdhcp</code>.</li>
         <li><b>Grace period status</b> -- list every MAC currently in <code>gracedhcp.txt</code> with IP, hostname and time remaining, colored by urgency (red &lt; 2 h, yellow &lt; 6 h, green otherwise).</li>
         <li><b>Consistency check + system summary</b> -- iterate over every MAC found in any source, print only those that violate a consistency rule, and finish with a per-state population summary (grace, blocked, ACL permanent, hotspot, active leases, total warnings).</li>
         <li><b>Search by IP or hostname</b> -- resolve an IP or hostname to its MAC(s) by scanning all sources, then run the full per-MAC consistency check on each match.</li>
+        <li><b>UniFi: unauthorized clients on the ESSID</b> -- query the UniFi controller's <code>stat/sta</code> endpoint and list clients connected to the configured hotspot ESSID that UniFi has not authorized.</li>
       </ul>
       Exits <code>0</code> on normal termination, <code>2</code> if not run as root. Requires root because the underlying files are owned by <code>root</code>/<code>pydhcpd</code>.
     </td>
     <td style="width: 50%; vertical-align: top;">
-      <b>ucheck.sh</b> -- Herramienta interactiva de diagnostico que verifica la presencia y consistencia de direcciones MAC en todas las fuentes de datos DHCP/ACL usadas por <code>pydhcpd</code> y <code>uhotspot</code>: <code>mac-hotspot.txt</code>, <code>gracedhcp.txt</code>, <code>blockdhcp.txt</code>, <code>acl_mac/*.txt</code> y <code>pydhcpd.leases</code>. Lanzada sin argumentos, presenta un menu con cuatro operaciones:
+      <b>ucheck.sh</b> -- Herramienta interactiva de diagnostico que verifica la presencia y consistencia de direcciones MAC en todas las fuentes de datos DHCP/ACL usadas por <code>pydhcpd</code> y <code>uhotspot</code>: <code>mac-hotspot.txt</code>, <code>gracedhcp.txt</code>, <code>blockdhcp.txt</code>, <code>acl_mac/*.txt</code>, <code>pydhcpd.leases</code> y (para la opcion 5) el <code>stat/sta</code> del controlador UniFi. Lanzada sin argumentos, presenta un menu con cinco operaciones:
       <ul>
         <li><b>Check MAC</b> -- inspecciona una sola MAC en todas las fuentes y marca estados contradictorios (ej. una MAC presente en <code>blockdhcp</code> y <code>acl_mac</code> al mismo tiempo). Si la MAC esta en periodo de gracia, tambien imprime el tiempo restante antes de promocion a <code>blockdhcp</code>.</li>
         <li><b>Grace period status</b> -- lista cada MAC actualmente en <code>gracedhcp.txt</code> con IP, hostname y tiempo restante, coloreado por urgencia (rojo &lt; 2 h, amarillo &lt; 6 h, verde en otro caso).</li>
         <li><b>Consistency check + system summary</b> -- itera sobre cada MAC encontrada en cualquier fuente, imprime solo las que violan alguna regla de consistencia, y termina con un resumen por estado (gracia, bloqueadas, ACL permanente, pendientes, hotspot, leases activos, total de advertencias).</li>
         <li><b>Search by IP or hostname</b> -- resuelve una IP o hostname a su(s) MAC(s) escaneando todas las fuentes, y luego corre el check completo de consistencia por cada coincidencia.</li>
+        <li><b>UniFi: unauthorized clients on the ESSID</b> -- consulta el endpoint <code>stat/sta</code> del controlador UniFi y lista los clientes conectados al ESSID configurado del hotspot que UniFi no ha autorizado.</li>
       </ul>
       Sale con <code>0</code> en terminacion normal, <code>2</code> si no se ejecuta como root. Requiere root porque los archivos subyacentes pertenecen a <code>root</code>/<code>pydhcpd</code>.
     </td>
@@ -931,14 +932,15 @@ sudo bash /etc/uhotspot/tools/ucheck.sh
   2. Grace period status
   3. Consistency check + system summary
   4. Search by IP or hostname
-  5. Exit
-  Select option [1-5]:
+  5. UniFi: unauthorized clients on the ESSID
+  6. Exit
+  Select option [1-6]:
 ```
 
 <b>Option 1 -- Check MAC</b>
 
 ```text
-Select option [1-5]: 1
+Select option [1-6]: 1
 
   Enter MAC address (XX:XX:XX:XX:XX:XX): 02:00:00:aa:bb:01
 === 02:00:00:aa:bb:01 ===
@@ -954,7 +956,7 @@ Select option [1-5]: 1
 <b>Option 2 -- Grace period status</b>
 
 ```text
-Select option [1-5]: 2
+Select option [1-6]: 2
   MAC                  IP                 NAME                      EXPIRES IN
   ---------------------------------------------------------------------------
   02:00:00:aa:bb:01    192.168.20.236     laptop-example-01         6h 40m
@@ -968,7 +970,7 @@ Select option [1-5]: 2
 <b>Option 3 -- Consistency check + system summary</b>
 
 ```text
-Select option [1-5]: 3
+Select option [1-6]: 3
   Collecting all MACs from all data sources...
 === SYSTEM SUMMARY ===
   MACs found total  : 197
@@ -983,7 +985,7 @@ Select option [1-5]: 3
 <b>Option 4 -- Search by IP or hostname</b>
 
 ```text
-Select option [1-5]: 4
+Select option [1-6]: 4
   Enter IP address or hostname: 192.168.20.55
   Searching for: 192.168.20.55
   Found 1 MAC(s):
@@ -994,6 +996,19 @@ Select option [1-5]: 4
   acl_mac/*.txt:     Y
         /etc/acl/acl_mac/mac-proxy.txt
   pydhcpd.leases:    N
+```
+
+<b>Option 5 -- UniFi: unauthorized clients on the ESSID</b>
+
+```text
+Select option [1-6]: 5
+  Connecting to https://192.168.0.1:8443...
+
+  === Clients on hotspot-example NOT authorized by UniFi ===
+
+  MAC                  HOSTNAME                  IP                 LAST_SEEN
+  --------------------------------------------------------------------------------
+  02:00:00:aa:bb:07    no-hostname               192.168.20.240     1752700000
 ```
 
 ##### Consistency rules applied
@@ -1320,11 +1335,12 @@ sudo -u uosserver podman exec uosserver curl -v http://192.168.0.10:8880/guest/s
 | Note | Description | Descripción |
 |------|-----|-----|
 | **Synchronization** | `uhotspot` depends on correct synchronization between UniFi Network, the DHCP server, and the user-maintained firewall script. It is not guaranteed to work on every Linux system. | `uhotspot` depende de la correcta sincronización entre UniFi Network, el servidor DHCP y el script firewall que mantiene el usuario. No se garantiza su funcionamiento en todos los sistemas Linux. |
-| **Lease queue** | The script queues lease removals for MACs it manages (via `leases-remove-queue.txt`). Actual removal is performed by `uleases.sh` during its safe DHCP stop→modify→start cycle. Leases for hotspot MACs are short-lived by design. | El script encola remociones de leases para los MACs que gestiona (vía `leases-remove-queue.txt`). La remoción real la ejecuta `uleases.sh` durante su ciclo seguro de detener→modificar→arrancar DHCP. Los leases para MACs del hotspot son de corta vida por diseño. |
+| **Lease queue** | The script queues lease removals for MACs it manages (via `leases-remove-queue.txt`). Actual removal is performed by `uleases.sh` during its safe DHCP stop→modify→start cycle. Leases for hotspot MACs are short-lived by design. `leases-remove-queue.txt` is an internal working file consumed by both scripts, not a config variable or ACL — do not edit it manually. | El script encola remociones de leases para los MACs que gestiona (vía `leases-remove-queue.txt`). La remoción real la ejecuta `uleases.sh` durante su ciclo seguro de detener→modificar→arrancar DHCP. Los leases para MACs del hotspot son de corta vida por diseño. `leases-remove-queue.txt` es un archivo de trabajo interno que consumen ambos scripts, no una variable de configuración ni una ACL — no debe editarse manualmente. |
 | **Firewall scope** | Both `gracedhcp.txt` and `mac-hotspot.txt` clients must be reachable via your DHCP server. Only `mac-hotspot.txt` clients should be granted full Internet by your firewall; grace-period clients (`macgrace` ipset) should only reach the captive portal ports. | Los clientes de `gracedhcp.txt` y `mac-hotspot.txt` deben ser alcanzables por su servidor DHCP. Solo `mac-hotspot.txt` debe tener Internet completo vía firewall; los clientes en período de gracia (ipset `macgrace`) solo deben llegar a los puertos del portal cautivo. |
 | **Script header** | Read the script header before deploying — it documents the full flow and any newly added behavior. | Lea el header del script antes de desplegarlo — documenta el flujo completo y cualquier comportamiento recién añadido. |
 | **Testing** | Always test in a non-production environment first. | Pruebe siempre en un entorno no productivo primero. |
 | **WPAD/PAC** | `uleases.sh` generates `/etc/pydhcp/pydhcpd.conf` dynamically on every run. Set `WPAD_ENABLED=true` in `uhotspot.conf` to enable WPAD/PAC via DHCP option 252. Prerequisites: Apache2 with a VirtualHost on port 18100 serving a valid `wpad.pac` file. Set `WPAD_ENABLED=false` (default) to disable. The `option wpad` lines are written automatically on the next `uleases.sh` run. | `uleases.sh` genera `/etc/pydhcp/pydhcpd.conf` dinámicamente en cada ejecución. Establezca `WPAD_ENABLED=true` en `uhotspot.conf` para activar WPAD/PAC vía DHCP option 252. Requisitos: Apache2 con un VirtualHost en el puerto 18100 sirviendo un archivo `wpad.pac` válido. Establezca `WPAD_ENABLED=false` (por defecto) para desactivar. Las líneas `option wpad` se escriben automáticamente en la próxima ejecución de `uleases.sh`. |
+| **WPAD/PAC scope** | `pydhcpd` is ACL-agnostic — when `WPAD_ENABLED=true` it sends DHCP option 252 to every client, including `mac-unlimited`. Since unlimited devices must never go through the proxy, `uiptables.sh` blocks them from reaching port 18100 (the PAC file) at the firewall level; the PAC's own `; DIRECT` fallback makes the browser proceed without a proxy for them. | `pydhcpd` no distingue ACLs — cuando `WPAD_ENABLED=true` envía la opción DHCP 252 a todos los clientes, incluyendo `mac-unlimited`. Como los dispositivos unlimited nunca deben pasar por el proxy, `uiptables.sh` les bloquea el acceso al puerto 18100 (el archivo PAC) a nivel de firewall; el fallback `; DIRECT` del propio PAC hace que el navegador siga sin proxy para ellos. |
 | **ping-check** | `ping-check true` is enabled by default in the `pydhcpd.conf` generated by `uleases.sh`. The daemon pings each IP before an OFFER to detect conflicts. In environments with strict ICMP firewall rules the ping will always time out silently and have no effect. Set `PING_CHECK_ENABLED=false` in `uhotspot.conf` to disable it. | `ping-check true` está activado por defecto en el `pydhcpd.conf` generado por `uleases.sh`. El demonio hace ping a cada IP antes del OFFER para detectar conflictos. En entornos con reglas de firewall estrictas que bloquean ICMP el ping siempre expirará sin efecto. Establezca `PING_CHECK_ENABLED=false` en `uhotspot.conf` para desactivarlo. |
 
 ## LIMITATIONS

@@ -385,11 +385,11 @@ function clean_hotspot_list() {
     local removed=0 patterns
     patterns=$(mktemp)
     TEMP_FILES_TO_CLEAN+=("${patterns}")
-    awk -F';' 'NF>=2 && $2!="" {print ";"$2";"}' "$ACL_MAC_UNLIMITED" | sort -u > "$patterns"
+    awk -F';' 'NF>=2 && $2!="" {print ";"tolower($2)";"}' "$ACL_MAC_UNLIMITED" | sort -u > "$patterns"
 
     while IFS= read -r pat; do
         local mac_actual="${pat//;/}"
-        if grep -qF "$pat" "$ACL_MAC_HOTSPOT" 2>/dev/null; then
+        if grep -qiF "$pat" "$ACL_MAC_HOTSPOT" 2>/dev/null; then
             log "clean_hotspot_list: removing $mac_actual from mac-hotspot (found in mac-unlimited)"
             (( removed++ )) || true
         fi
@@ -397,7 +397,7 @@ function clean_hotspot_list() {
 
     if (( removed > 0 )); then
         local _grep_rc=0
-        grep -vFf "$patterns" "$ACL_MAC_HOTSPOT" > "$ACL_MAC_HOTSPOT".tmp || _grep_rc=$?
+        grep -viFf "$patterns" "$ACL_MAC_HOTSPOT" > "$ACL_MAC_HOTSPOT".tmp || _grep_rc=$?
         if (( _grep_rc > 1 )); then
             log "ERROR: clean_hotspot_list: grep failed (rc=$_grep_rc) — skipping update of mac-hotspot"
             rm -f "$ACL_MAC_HOTSPOT".tmp
@@ -747,11 +747,11 @@ class "blockdhcp" {
         local removed=0 patterns
         patterns=$(mktemp)
         TEMP_FILES_TO_CLEAN+=("${patterns}")
-        awk -F';' 'NF>=2 && $2!="" {print ";"$2";"}' "$ACL_MAC_UNLIMITED" | sort -u > "$patterns"
+        awk -F';' 'NF>=2 && $2!="" {print ";"tolower($2)";"}' "$ACL_MAC_UNLIMITED" | sort -u > "$patterns"
 
         while IFS= read -r pat; do
             local mac_actual="${pat//;/}"
-            if grep -qF "$pat" "$ACL_MAC_PROXY" 2>/dev/null; then
+            if grep -qiF "$pat" "$ACL_MAC_PROXY" 2>/dev/null; then
                 log "clean_proxy_list: removing $mac_actual from mac-proxy (found in mac-unlimited)"
                 (( removed++ )) || true
             fi
@@ -762,7 +762,7 @@ class "blockdhcp" {
             file_temp=$(mktemp)
             TEMP_FILES_TO_CLEAN+=("${file_temp}")
             local _grep_rc=0
-            grep -vFf "$patterns" "$ACL_MAC_PROXY" > "$file_temp" || _grep_rc=$?
+            grep -viFf "$patterns" "$ACL_MAC_PROXY" > "$file_temp" || _grep_rc=$?
             if (( _grep_rc > 1 )); then
                 log "ERROR: clean_proxy_list: grep failed (rc=$_grep_rc) — skipping update of mac-proxy"
                 rm -f "$file_temp"

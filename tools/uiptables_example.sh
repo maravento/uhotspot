@@ -101,8 +101,8 @@ _load_conf() {
 
 _load_conf "$_UHOTSPOT_CONF"
 
-wan="${WAN_IF:-eno1}"
-lan="${LAN_IF:-bond0}"
+wan="${WAN_IF:-eth0}"
+lan="${LAN_IF:-eth1}"
 localnet="${SERV_SUBNET:-192.168.0.0}"
 serverip="${SERV_DHCP:-192.168.0.10}"
 SERV_DNS="${SERV_DNS:-8.8.8.8,1.1.1.1}"
@@ -491,6 +491,10 @@ for mac in $(awk -F";" '$2 != "" {print $2}' "$mac_unlimited_file" 2>/dev/null);
 done
 iptables -t nat -A PREROUTING -i "$lan" -m set --match-set macunlimited src -j ACCEPT
 iptables -t mangle -A PREROUTING -i "$lan" -m set --match-set macunlimited src -j ACCEPT
+# Unlimited devices never use the proxy — block PAC access so DHCP option 252
+# (WPAD, if enabled) has no effect on them, since pydhcpd is ACL-agnostic and
+# sends it to every client regardless of classification.
+iptables -A INPUT -i "$lan" -p tcp -m multiport --dports 3128,18100 -m set --match-set macunlimited src -j DROP
 for chain in INPUT FORWARD; do
     iptables -A "$chain" -i "$lan" -m set --match-set macunlimited src -j ACCEPT
 done

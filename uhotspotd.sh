@@ -103,7 +103,7 @@ cleanup_temp() {
     # whatever was last logged instead of opening a delimiter block of its
     # own — a raya must mark the start of a cycle/session, never a shutdown.
     if (( rc != 1 )) && declare -F log_raw &>/dev/null; then
-        log_raw "INFO: uhotspotd done at: $(date)"
+        log_raw "INFO: uhotspotd done"
     fi
 }
 trap cleanup_temp EXIT
