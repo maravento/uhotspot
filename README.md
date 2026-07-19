@@ -525,9 +525,9 @@ ACL_MAC_HOTSPOT=/etc/uhotspot/acl/umacauth.txt
 
 # ── Daemon & DHCP timers ─────────────────────────────────────────────────────
 POLL_INTERVAL=20
-CLEANUP_INTERVAL=50
+CLEANUP_INTERVAL=60
 AUTHORIZED_LEASE_TIME=2592000
-BLOCKDHCP_GRACE_SECONDS=43200
+BLOCKDHCP_GRACE_SECONDS=86400
 
 # ── Optional features ────────────────────────────────────────────────────────
 UNIFI_HOTSPOT_ENABLED=true
@@ -775,11 +775,15 @@ cd uhotspot && sudo bash usetup.sh
       Systemd unit for <code>uhotspotd.sh</code>. <code>Restart=always</code> with <code>RestartSec=10</code> restarts the daemon on any crash; <code>StartLimitIntervalSec=300</code> / <code>StartLimitBurst=10</code> (in <code>[Unit]</code>) cap it at 10 restarts per 5 minutes before systemd marks it <code>start-limit-hit</code> and stops trying — a general crash-loop guard, not specific to any one failure mode. <code>After=network.target pydhcpd.service</code> / <code>Wants=pydhcpd.service</code> order startup after the DHCP backend, though <code>uhotspotd.sh</code> still tolerates <code>pydhcpd</code> coming up late via its own startup grace (see <a href="#daemon-cycle">Daemon Cycle</a>).
       <br><br>
       Installed at <code>/etc/systemd/system/uhotspotd.service</code>, deployed from <code>/etc/uhotspot/core/uhotspotd.service</code>.
+      <br><br>
+      <b>Note — sandboxing</b>: <code>ProtectHome=read-only</code>, <code>ProtectControlGroups=yes</code>, <code>ProtectClock=yes</code>, <code>ProtectHostname=yes</code>, <code>ProtectKernelLogs=yes</code>, <code>LockPersonality=yes</code>, <code>RestrictRealtime=yes</code> and <code>RestrictSUIDSGID=yes</code> are applied — none of them intersect any path or syscall this daemon or its reload chain actually uses. Two more common hardening directives are intentionally <b>not</b> set, because they would break real functionality: <code>ProtectSystem=strict</code> would make <code>/etc</code> read-only, but <code>uleases.sh</code> rewrites <code>/etc/pydhcp/pydhcpd.conf</code> and <code>pydhcpd.leases</code> on every reload, and the admin-supplied <code>uiptables.sh</code> is arbitrary code that may need to write anywhere on the system (persistent ipset/iptables rule files, etc.) — a static <code>ReadWritePaths</code> allowlist can't be correct in general for a script the admin fully controls. <code>NoNewPrivileges=yes</code> would break <code>uleases.sh</code>'s desktop-notification path (<code>_notify()</code>, which calls <code>sudo -u $user notify-send</code>) — modern <code>sudo</code> explicitly detects the no-new-privileges flag and refuses to run, even when the calling process is already root.
     </td>
     <td style="width: 50%; vertical-align: top;">
       Unit systemd para <code>uhotspotd.sh</code>. <code>Restart=always</code> con <code>RestartSec=10</code> reinicia el daemon ante cualquier caída; <code>StartLimitIntervalSec=300</code> / <code>StartLimitBurst=10</code> (en <code>[Unit]</code>) lo limitan a 10 reinicios cada 5 minutos antes de que systemd lo marque <code>start-limit-hit</code> y deje de intentarlo — una protección general contra crash-loops, no específica de un solo modo de fallo. <code>After=network.target pydhcpd.service</code> / <code>Wants=pydhcpd.service</code> ordenan el arranque después del backend DHCP, aunque <code>uhotspotd.sh</code> igual tolera que <code>pydhcpd</code> arranque tarde gracias a su propio período de gracia al inicio (ver <a href="#daemon-cycle">Daemon Cycle</a>).
       <br><br>
       Instalado en <code>/etc/systemd/system/uhotspotd.service</code>, desplegado desde <code>/etc/uhotspot/core/uhotspotd.service</code>.
+      <br><br>
+      <b>Nota — sandboxing</b>: se aplican <code>ProtectHome=read-only</code>, <code>ProtectControlGroups=yes</code>, <code>ProtectClock=yes</code>, <code>ProtectHostname=yes</code>, <code>ProtectKernelLogs=yes</code>, <code>LockPersonality=yes</code>, <code>RestrictRealtime=yes</code> y <code>RestrictSUIDSGID=yes</code> — ninguna interseca con ninguna ruta o syscall que el daemon o su cadena de reload usen realmente. Dos directivas de hardening comunes se dejan intencionalmente <b>fuera</b>, porque romperían funcionalidad real: <code>ProtectSystem=strict</code> dejaría <code>/etc</code> de solo lectura, pero <code>uleases.sh</code> reescribe <code>/etc/pydhcp/pydhcpd.conf</code> y <code>pydhcpd.leases</code> en cada reload, y el <code>uiptables.sh</code> que provee el administrador es código arbitrario que puede necesitar escribir en cualquier parte del sistema (archivos de persistencia de ipset/iptables, etc.) — una whitelist estática de <code>ReadWritePaths</code> no puede ser correcta en general para un script que el administrador controla por completo. <code>NoNewPrivileges=yes</code> rompería la ruta de notificaciones de escritorio de <code>uleases.sh</code> (<code>_notify()</code>, que llama <code>sudo -u $user notify-send</code>) — el <code>sudo</code> moderno detecta explícitamente la bandera de no-nuevos-privilegios y se niega a ejecutar, incluso cuando el proceso que llama ya es root.
     </td>
   </tr>
 </table>

@@ -164,13 +164,22 @@ ExecStart=/etc/uhotspot/tools/ualert.sh
 Restart=always
 RestartSec=10
 PrivateTmp=yes
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target
 UNITEOF
 
     systemctl daemon-reload
-    systemctl enable --now ualert.service
+    systemctl enable ualert.service
+    systemctl restart ualert.service
 
     echo ""
     echo "✓ Installed and started. Check with: systemctl status ualert"

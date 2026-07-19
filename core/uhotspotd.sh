@@ -656,8 +656,8 @@ clean_managed_macs() {
     [[ -z "$MANAGED_MACS" ]] && return
     local removed=0 tmp
 
-    for list in "$MAC_LIST"; do
-        [[ ! -f "$list" ]] && continue
+    local list="$MAC_LIST"
+    if [[ -f "$list" ]]; then
         local before_count=0
         before_count=$(grep -c '^a;' "$list" 2>/dev/null); before_count=$(( ${before_count:-0} + 0 ))
         local iter_removed=0
@@ -685,10 +685,10 @@ clean_managed_macs() {
         if (( before_count - after_count != iter_removed )); then
             log "ERROR: clean_managed_macs: count mismatch on $(basename "$list") (before=$before_count after=$after_count removed=$iter_removed) — skipping"
             rm -f "$tmp"
-            continue
+        else
+            mv "$tmp" "$list" && chmod 600 "$list"
         fi
-        mv "$tmp" "$list" && chmod 600 "$list"
-    done
+    fi
 
     if (( removed > 0 )); then
         log "INFO: clean_managed_macs → done (removed $removed entries)"

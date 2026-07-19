@@ -96,7 +96,28 @@ if [[ "$_owner" != "root" ]] || [[ "$_gdigit" != "0" ]] || [[ "$_odigit" != "0" 
     log "ERROR: $CONFIG has unsafe owner/permissions (owner=$_owner perms=$_perms) — must be owned by root with no group/other access (600). Refusing to source it."
     exit 1
 fi
-source "$CONFIG"
+
+load_config() {
+    local file="$1" line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*[#] ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$    ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value//\\\"/\"}"
+        value="${value//\\\$/\$}"
+        value="${value//\\\`/\`}"
+        value="${value//\\\\/\\}"
+        case "$key" in
+            UNIFI_CONTROLLER_URL|UNIFI_USERNAME|UNIFI_PASSWORD|UNIFI_SITE|UNIFI_TYPE|HOTSPOT_ESSID)
+                printf -v "$key" '%s' "$value"
+                ;;
+        esac
+    done < "$file"
+}
+load_config "$CONFIG"
 
 if [ -z "${UNIFI_CONTROLLER_URL:-}" ] || [ -z "${UNIFI_USERNAME:-}" ] || [ -z "${UNIFI_PASSWORD:-}" ] || [ -z "${HOTSPOT_ESSID:-}" ]; then
     log "ERROR: Missing required variables (UNIFI_CONTROLLER_URL, UNIFI_USERNAME, UNIFI_PASSWORD, HOTSPOT_ESSID) in $CONFIG"

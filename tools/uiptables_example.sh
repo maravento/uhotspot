@@ -290,7 +290,7 @@ sysctl -w net.ipv4.icmp_ratelimit=100 >/dev/null 2>&1
 sysctl -w "net.ipv6.conf.${wan}.disable_ipv6=0" >/dev/null 2>&1
 # LAN IPv6
 sysctl -w "net.ipv6.conf.${lan}.disable_ipv6=1" >/dev/null 2>&1
-# ICMPv6 esencial (NDP, SLAAC, Path MTU)
+# Essential ICMPv6 (NDP, SLAAC, Path MTU)
 ip6tables -A OUTPUT -o "$wan" -p ipv6-icmp -j ACCEPT
 # DHCPv6
 ip6tables -A OUTPUT -o "$wan" -p udp --sport 546 --dport 547 -j ACCEPT
