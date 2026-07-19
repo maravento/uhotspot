@@ -14,9 +14,14 @@
 #      load_all_vouchers() logs exactly once per cycle when the controller
 #      is unreachable. Successful cycles are silent, so consecutive
 #      failures are identified by comparing timestamps: a gap larger than
-#      POLL_INTERVAL (+ margin) between two failure lines means cycles
-#      succeeded silently in between, and the streak resets. Alerts once
-#      API_FAIL_THRESHOLD consecutive cycles fail, and again once recovered.
+#      GAP_LIMIT = POLL_INTERVAL + 3*API_MAX_TIME + MARGIN (default
+#      20 + 3*30 + 10 = 120s) between two failure lines means cycles
+#      succeeded silently in between, and the streak resets. The 3*API_MAX_TIME
+#      term covers the worst case of a failed cycle still making up to three
+#      30s-capped API calls (vouchers, guest, sta) before it ends. Alerts once
+#      API_FAIL_THRESHOLD consecutive cycles fail, and again once recovered
+#      (same GAP_LIMIT is the read timeout used to detect recovery — see
+#      watch loop below).
 #      Suppressed while uhotspotd.service has been active for less than
 #      STARTUP_GRACE_SECONDS (default 120s) — UniFi Network/UniFi OS can
 #      take a while to come back up after a reboot, and ualert itself
@@ -98,14 +103,6 @@ esac
 ## root check
 if [ "$(id -u)" != "0" ]; then
     log "ERROR: This script must be run as root"
-    exit 1
-fi
-
-# prevent overlapping runs
-SCRIPT_LOCK="/var/lock/$(basename "$0" .sh).lock"
-exec 200>"$SCRIPT_LOCK"
-if ! flock -w 60 200; then
-    log "Script $(basename "$0") is already running — waited 60s, giving up"
     exit 1
 fi
 
@@ -205,6 +202,16 @@ case "${1:-}" in
         exit 0
         ;;
 esac
+
+# prevent overlapping runs of the watch loop itself — install/uninstall above
+# are one-shot admin actions and must not block on (or be blocked by) the
+# lock the service holds for its entire lifetime.
+SCRIPT_LOCK="/var/lock/$(basename "$0" .sh).lock"
+exec 200>"$SCRIPT_LOCK"
+if ! flock -w 60 200; then
+    log "Script $(basename "$0") is already running — waited 60s, giving up"
+    exit 1
+fi
 
 # ── Watch loop (default action — this is what ualert.service runs) ────────────
 
@@ -321,8 +328,12 @@ while true; do
     else
         # read timed out: no new failure line for a full GAP_LIMIT window.
         if (( alerted == 1 )); then
-            notify "uhotspot: recovered — no new failures in the last ${GAP_LIMIT}s"
-            log "ALERT: recovery notice sent"
+            if systemctl is-active --quiet uhotspotd; then
+                notify "uhotspot: recovered — no new failures in the last ${GAP_LIMIT}s"
+                log "ALERT: recovery notice sent"
+            else
+                log "INFO: uhotspotd is not active — suppressing recovery notice"
+            fi
         fi
         streak=0
         alerted=0

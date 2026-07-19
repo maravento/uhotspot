@@ -6,7 +6,7 @@
 # uaudit - UniFi Network Hotspot - Full Client Audit & Management Tool
 #
 # REPORT SECTIONS
-#   1. Authorized  - mac-hotspot.txt enriched with voucher code and status.
+#   1. Authorized  - umacauth.txt enriched with voucher code and status.
 #                    Voucher code is extracted from the hostname field
 #                    (format: guest{n}-{code}) and verified against stat/voucher.
 #                    STATUS values: MULTI (USED_MULTIPLE), VALID (VALID_ONE),
@@ -123,13 +123,36 @@ do_login() {
         --connect-timeout 10 --max-time 40 \
         "$UNIFI_CONTROLLER_URL$login_path" <<< "$payload")
 
-    CSRF_TOKEN=$(echo "$LOGIN" | grep -iE "^x-(updated-)?csrf-token:" | tail -1 | awk '{print $2}' | tr -d "\r")
     if [[ "$TYPE" == "classic" ]]; then
         SESSION_COOKIE=$(echo "$LOGIN" | grep -i "^set-cookie:" | grep -i "unifises=" | head -1 \
             | sed -E "s/.*unifises=([^;]+).*/unifises=\1/" | tr -d "\r")
+        CSRF_TOKEN=$(echo "$LOGIN" | grep -iE "^x-(updated-)?csrf-token:" | tail -1 | awk '{print $2}' | tr -d "\r")
     else
-        SESSION_COOKIE=$(echo "$LOGIN" | grep -i "^set-cookie:" | grep -i "TOKEN=" | head -1 \
-            | sed -E "s/.*TOKEN=([^;]+).*/TOKEN=\1/" | tr -d "\r")
+        local token
+        token=$(echo "$LOGIN" | grep -i "^set-cookie:" | grep -i "TOKEN=" | head -1 \
+            | sed -E "s/.*TOKEN=([^;]+).*/\1/" | tr -d "\r")
+
+        if [ -z "$token" ]; then
+            log "ERROR: Authentication failed. Check credentials in $CONFIG"
+            exit 1
+        fi
+        SESSION_COOKIE="TOKEN=${token}"
+
+        # UniFi OS embeds the CSRF token inside the JWT payload (csrfToken field).
+        local jwt_payload pad padded
+        jwt_payload=$(echo "$token" | cut -d'.' -f2 | tr '_-' '/+')
+        pad=$(( (4 - ${#jwt_payload} % 4) % 4 ))
+        padded="$jwt_payload"
+        if (( pad > 0 )); then
+            padded="${jwt_payload}$(printf '%*s' "$pad" '' | tr ' ' '=')"
+        fi
+        CSRF_TOKEN=$(echo "$padded" | base64 -d 2>/dev/null \
+            | jq -r '.csrfToken // empty' 2>/dev/null || true)
+
+        # Fallback: check response headers, in case a given UniFi OS version emits them.
+        if [[ -z "$CSRF_TOKEN" ]]; then
+            CSRF_TOKEN=$(echo "$LOGIN" | grep -iE "^x-(updated-)?csrf-token:" | tail -1 | awk '{print $2}' | tr -d "\r")
+        fi
     fi
 
     if [ -z "$SESSION_COOKIE" ]; then
@@ -210,12 +233,12 @@ log "stat/sta     -> $STA_RC    ($(echo "$STA"     | jq '.data|length' 2>/dev/nu
 log "stat/guest   -> $GUEST_RC  ($(echo "$GUEST"   | jq '.data|length' 2>/dev/null) entries)"
 log "stat/voucher -> $VCH_RC    ($(echo "$VOUCHER" | jq '.data|length' 2>/dev/null) entries)"
 
-# ── Section 1: Authorized clients (mac-hotspot.txt + stat/guest + stat/sta) ───
+# ── Section 1: Authorized clients (umacauth.txt + stat/guest + stat/sta) ───
 # VOUCHER RESOLUTION STRATEGY:
-#   1. Extract voucher code from hostname field in mac-hotspot.txt
+#   1. Extract voucher code from hostname field in umacauth.txt
 #      (format: guest{n}-{voucher_code}, e.g. guest3-7708162928)
 #      This is always available even when the client is disconnected,
-#      because uhotspot.sh writes it at authorization time.
+#      because uhotspotd.sh writes it at authorization time.
 #   2. Verify the code exists in stat/voucher (API) and enrich with status.
 #      If found: show as CODE(STATUS)  e.g. 7708162928(USED_MULTIPLE)
 #      If not found in stat/voucher: quota exhausted and auto-purged by UniFi, show as CODE(CONSUMED)
@@ -223,12 +246,12 @@ log "stat/voucher -> $VCH_RC    ($(echo "$VOUCHER" | jq '.data|length' 2>/dev/nu
 #      This covers clients still connected whose session is in stat/guest.
 #   4. If neither source yields a code: show N/A.
 print_authorized() {
-    local ACL_HOTSPOT="/etc/uhotspot/mac-hotspot.txt"
+    local ACL_HOTSPOT="/etc/uhotspot/acl/umacauth.txt"
     [ ! -f "$ACL_HOTSPOT" ] && return
 
     echo ""
     echo "============================================================================"
-    echo " AUTHORIZED — mac-hotspot.txt"
+    echo " AUTHORIZED — umacauth.txt"
     echo "============================================================================"
 
     local sta_map

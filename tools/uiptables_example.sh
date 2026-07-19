@@ -114,7 +114,7 @@ acl_mac_path="${ACL_MAC_PATH:-/etc/acl/acl_mac}"
 acl_path="${acl_mac_path%/acl_mac}"
 acl_ipt_path="${acl_path}/acl_ipt"
 hotspot_path="${HOTSPOT_PATH:-/etc/uhotspot}"
-grace_file="${ACL_DHCP_PATH:-${acl_path}/acl_dhcp}/gracedhcp.txt"
+grace_file="${ACL_GRACE_FILE:-${hotspot_path}/acl/ugrace.txt}"
 
 # ACL/config files used by this script (existence verified below)
 mac_proxy_file="${ACL_MAC_PROXY:-$acl_mac_path/mac-proxy.txt}"
@@ -132,23 +132,6 @@ done
 if [ ! -d "$acl_mac_path" ] || [ -z "$(ls -A "$acl_mac_path" 2>/dev/null)" ]; then
     log "ERROR: acl_mac_path missing or empty: $acl_mac_path"
     exit 1
-fi
-
-logrotate_conf="/etc/logrotate.d/uhotspot"
-if [ ! -f "$logrotate_conf" ]; then
-    cat > "$logrotate_conf" <<'EOF'
-/var/log/uhotspot.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 640 root adm
-}
-EOF
-    chmod 644 "$logrotate_conf"
-    chown root:root "$logrotate_conf"
 fi
 
 ### KERNEL RULES ###
@@ -551,8 +534,8 @@ fi
 for mac in $(awk -F";" '$2 != "" {print $2}' "$acl_mac_path"/mac-* 2>/dev/null); do
     is_valid_mac "$mac" && ipset add macports "$mac" -exist
 done
-if [ -f "$hotspot_path/mac-hotspot.txt" ]; then
-    for mac in $(awk -F";" '$2 != "" {print $2}' "$hotspot_path/mac-hotspot.txt"); do
+if [ -f "$hotspot_path/acl/umacauth.txt" ]; then
+    for mac in $(awk -F";" '$2 != "" {print $2}' "$hotspot_path/acl/umacauth.txt"); do
         is_valid_mac "$mac" && ipset add macports "$mac" -exist
     done
 fi
@@ -654,8 +637,8 @@ if ! ipset list machotspot &>/dev/null; then
 else
     ipset flush machotspot
 fi
-if [ -f "$hotspot_path/mac-hotspot.txt" ]; then
-    for mac in $(awk -F";" '$2 != "" {print $2}' "$hotspot_path/mac-hotspot.txt"); do
+if [ -f "$hotspot_path/acl/umacauth.txt" ]; then
+    for mac in $(awk -F";" '$2 != "" {print $2}' "$hotspot_path/acl/umacauth.txt"); do
         is_valid_mac "$mac" && ipset add machotspot "$mac" -exist
     done
 fi

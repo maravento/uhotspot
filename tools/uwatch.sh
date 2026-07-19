@@ -27,22 +27,19 @@
 #      If those credentials are not set in uhotspot.conf, falls back to a
 #      process/port-only check instead of skipping the check entirely.
 #      - "unifi-os": uosserver.service. UOS Server is an all-in-one container
-#        that bundles its own MongoDB internally (confirmed 2026-07-12 by
-#        inspecting the running container: no host-level mongod.service is
-#        part of this architecture) — a broken internal Mongo is exactly the
+#        that bundles its own MongoDB internally — no host-level mongod.service
+#        is part of this architecture. A broken internal Mongo is exactly the
 #        failure mode the login check catches that a plain process check
 #        cannot. A standalone mongod.service found running alongside UOS
 #        Server is very likely a leftover from a previous classic install and
 #        is not monitored here.
-#      - "classic": unifi.service. Confirmed 2026-07-13 on a real classic
-#        install (UniFi Network 10.5.54): unifi.service ships with
-#        UNIFI_MONGODB_SERVICE_ENABLED=false by default, so it manages its
-#        own embedded MongoDB subprocess (127.0.0.1:27117) end-to-end,
-#        including its own shutdown logic — the mongodb-org-server package's
-#        own mongod.service unit is never started and its data directory
-#        stays empty. Same all-in-one shape as unifi-os above, so restarting
-#        unifi.service already covers a Mongo failure too. Credentials-absent
-#        fallback checks ports 8443/8080 instead.
+#      - "classic": unifi.service. Ships with UNIFI_MONGODB_SERVICE_ENABLED=false
+#        by default, so it manages its own embedded MongoDB subprocess
+#        (127.0.0.1:27117) end-to-end, including its own shutdown logic — the
+#        mongodb-org-server package's own mongod.service unit is never started
+#        and its data directory stays empty. Same all-in-one shape as unifi-os
+#        above, so restarting unifi.service already covers a Mongo failure
+#        too. Credentials-absent fallback checks ports 8443/8080 instead.
 #
 #   Standalone — never reads or modifies uhotspotd.sh, only manages services
 #   via systemctl. Independent of the user's own system-wide service
@@ -71,7 +68,7 @@ log() {
 }
 
 usage() {
-    sed -n '2,64p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -161,6 +158,10 @@ _load_conf() {
         value="${line#*=}"
         value="${value%\"}"
         value="${value#\"}"
+        value="${value//\\\"/\"}"
+        value="${value//\\\$/\$}"
+        value="${value//\\\`/\`}"
+        value="${value//\\\\/\\}"
         case "$key" in
             UNIFI_TYPE|UNIFI_CONTROLLER_URL|UNIFI_USERNAME|UNIFI_PASSWORD)
                 printf -v "$key" '%s' "$value"
@@ -211,8 +212,8 @@ check_uosserver() {
     # All-in-one container — its internal MongoDB is bundled and managed by
     # the container itself, never a host-level service. Do not check/restart
     # any standalone mongod.service here; it is not part of this
-    # architecture and restarting uosserver.service for an unrelated host
-    # Mongo issue is exactly what caused a real outage on 2026-07-12.
+    # architecture, and restarting uosserver.service would not fix an
+    # unrelated host-level Mongo issue.
     if ! systemctl is-active --quiet uosserver.service; then
         log "WARNING: UOS OFFLINE"
         if systemctl start uosserver.service; then
@@ -278,7 +279,7 @@ check_unifi_classic() {
     if [[ -z "${UNIFI_USERNAME:-}" || -z "${UNIFI_PASSWORD:-}" ]]; then
         log "WARNING: UNIFI_USERNAME/UNIFI_PASSWORD not set"
         log "Skipping functional login check"
-        # Fall back to the old port check so this isn't a total no-op.
+        # Fall back to a port check so this isn't a total no-op.
         if ! ss -lnt | grep -qE ':(8443|8080)\b'; then
             log "WARNING: UniFi (classic) BROKEN_PORTS"
             if systemctl restart unifi.service; then
@@ -318,8 +319,7 @@ check_ualert
 if [[ "$UNIFI_TYPE" == "unifi-os" ]]; then
     check_uosserver
 else
-    # No separate Mongo check — confirmed on a real classic install (UniFi
-    # Network 10.5.54) that unifi.service ships with
+    # No separate Mongo check — unifi.service ships with
     # UNIFI_MONGODB_SERVICE_ENABLED=false by default, so it manages its own
     # embedded MongoDB subprocess (127.0.0.1:27117) end-to-end, same as
     # uosserver above. check_unifi_classic already covers it.

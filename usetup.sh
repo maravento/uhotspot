@@ -11,16 +11,34 @@
 #    sudo bash usetup.sh --help      Usage
 #
 #  Run from inside the cloned repo. The script expects to find:
-#    ./uhotspotd.sh
-#    ./uhotspotd.service
+#    ./core/uhotspotd.sh
+#    ./core/uhotspotd.service
+#    ./core/ureload.sh
+#    ./core/uleases.sh
 #    ./tools/uaudit.sh
 #    ./tools/ucheck.sh
-#    ./tools/ureload.sh
-#    ./tools/uleases.sh
 #    ./tools/uhotspotmon.sh
 #    ./tools/ualert.sh
 #    ./tools/uwatch.sh
-#    ./tools/uiptables_example.sh
+#    ./tools/uiptables_example.sh   (reference template only -- see below,
+#                                    not required, not deployed)
+#    ./acl/umacauth.txt
+#    ./acl/umacbak.txt
+#    ./acl/uqueue.txt
+#    ./acl/ugrace.txt
+#
+#  core/ holds the reload mechanism itself (uleases.sh reconciles ACLs/leases,
+#  ureload.sh invokes it, uhotspotd.sh/.service run the daemon that calls
+#  ureload.sh) — uhotspot cannot function without any of these. tools/ holds
+#  independent, optional utilities (auditing, monitoring, alerting) that
+#  uhotspot runs fine without. acl/ holds uhotspot's own data files (empty
+#  templates in the repo, deployed once and never overwritten afterward) —
+#  not to be confused with /etc/acl, which belongs to pydhcp/iptables.
+#
+#  tools/uiptables_example.sh is a reference template, not a functional
+#  script — the administrator copies it to /etc/uhotspot/tools/uiptables.sh
+#  and adapts it manually. deploy_scripts() below explicitly excludes it
+#  from the tools/*.sh deploy loop; it is never installed automatically.
 #
 #  Hard dependencies (checked before anything else; aborts if any is missing —
 #  none of these are auto-installed):
@@ -36,7 +54,9 @@ set -euo pipefail
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 HOTSPOT_DIR="/etc/uhotspot"
+CORE_DIR="${HOTSPOT_DIR}/core"
 TOOLS_DIR="${HOTSPOT_DIR}/tools"
+ACL_DIR="${HOTSPOT_DIR}/acl"
 CONFIG_FILE="${HOTSPOT_DIR}/uhotspot.conf"
 LOG_FILE="/var/log/uhotspot.log"
 LOGROTATE_FILE="/etc/logrotate.d/uhotspot"
@@ -45,9 +65,11 @@ SERVICE_DEST="/etc/systemd/system/uhotspotd.service"
 
 # ─── Repo file expectations (relative to this script) ────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_CORE="${SCRIPT_DIR}/core"
 REPO_TOOLS="${SCRIPT_DIR}/tools"
-REPO_UHOTSPOTD="${SCRIPT_DIR}/uhotspotd.sh"
-REPO_SERVICE="${SCRIPT_DIR}/uhotspotd.service"
+REPO_ACL="${SCRIPT_DIR}/acl"
+REPO_UHOTSPOTD="${REPO_CORE}/uhotspotd.sh"
+REPO_SERVICE="${REPO_CORE}/uhotspotd.service"
 
 # ─── Required apt packages ────────────────────────────────────────────────────
 APT_DEPS=(curl jq iptables ipset cron python3)
@@ -66,6 +88,16 @@ abort() { err "$*"; exit 1; }
 version_ge() {
     # version_ge A B — returns 0 if version A >= version B
     [[ "$1" == "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" ]]
+}
+
+dq_escape() {
+    # dq_escape STRING — escape \ " $ ` for safe reuse inside double quotes
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//\$/\\\$}"
+    s="${s//\`/\\\`}"
+    printf '%s' "$s"
 }
 
 confirm() {
@@ -95,7 +127,8 @@ check_distro() {
 }
 
 detect_local_user() {
-    # Multi-strategy detection (mirrors uhotspot.sh logic).
+    # Multi-strategy detection: falls through session/login sources until
+    # one resolves to a valid local user.
     LOCAL_USER=""
     LOCAL_USER=$(who | awk '/\(:0\)/{print $1; exit}')
     [[ -z "$LOCAL_USER" ]] && LOCAL_USER=$(logname 2>/dev/null || true)
@@ -109,9 +142,12 @@ detect_local_user() {
 }
 
 check_repo_files() {
-    [[ -r "$REPO_UHOTSPOTD" ]] || abort "Missing $(basename "$REPO_UHOTSPOTD"). Run usetup.sh from inside the cloned uhotspot repository."
-    [[ -r "$REPO_SERVICE"   ]] || abort "Missing $(basename "$REPO_SERVICE"). Run usetup.sh from inside the cloned uhotspot repository."
-    [[ -d "$REPO_TOOLS"     ]] || abort "Missing tools/ directory. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "$REPO_UHOTSPOTD"          ]] || abort "Missing $(basename "$REPO_UHOTSPOTD"). Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "$REPO_SERVICE"            ]] || abort "Missing $(basename "$REPO_SERVICE"). Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "${REPO_CORE}/ureload.sh"  ]] || abort "Missing core/ureload.sh. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "${REPO_CORE}/uleases.sh"  ]] || abort "Missing core/uleases.sh. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -d "$REPO_TOOLS"              ]] || abort "Missing tools/ directory. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -d "$REPO_ACL"                ]] || abort "Missing acl/ directory. Run usetup.sh from inside the cloned uhotspot repository."
     info "Repo files located"
 }
 
@@ -140,7 +176,7 @@ detect_dhcp_backend() {
     fi
 }
 
-# ─── Interactive prompts (migrated from uhotspot.sh) ─────────────────────────
+# ─── Interactive prompts ──────────────────────────────────────────────────────
 ask() {
     local prompt="$1" default="$2" var="$3" answer
     if [[ -n "$default" ]]; then
@@ -354,7 +390,7 @@ run_setup_wizard() {
 
     step "Reload script"
     echo "  Script invoked after every ACL change (must exist and be executable)."
-    ask "Path to reload script" "${TOOLS_DIR}/ureload.sh" CFG_RELOAD_SCRIPT
+    ask "Path to reload script" "${CORE_DIR}/ureload.sh" CFG_RELOAD_SCRIPT
 
     step "DHCP network"
     ask_mask() {
@@ -420,10 +456,11 @@ run_setup_wizard() {
     step "Writing $CONFIG_FILE"
     (
         umask 077
-        local ESSID_Q USER_Q PASS_Q
-        ESSID_Q=$(printf '%q' "$CFG_ESSID")
-        USER_Q=$(printf '%q' "$CFG_UNIFI_USER")
-        PASS_Q=$(printf '%q' "$CFG_UNIFI_PASS")
+        local ESSID_Q USER_Q PASS_Q URL_Q
+        ESSID_Q=$(dq_escape "$CFG_ESSID")
+        USER_Q=$(dq_escape "$CFG_UNIFI_USER")
+        PASS_Q=$(dq_escape "$CFG_UNIFI_PASS")
+        URL_Q=$(dq_escape "$found_url")
         cat > "$CONFIG_FILE" <<EOF
 # uhotspot — auto-generated by usetup.sh on $(date '+%Y-%m-%d %H:%M:%S')
 # Edit this file to adjust any value.
@@ -440,12 +477,12 @@ HOTSPOT_RANGE_START=${CFG_RANGE_START}
 HOTSPOT_RANGE_END=${CFG_RANGE_END}
 
 # ── Guest SSID ───────────────────────────────────────────────────────────────
-HOTSPOT_ESSID=${ESSID_Q}
+HOTSPOT_ESSID="${ESSID_Q}"
 
 # ── UniFi Controller ─────────────────────────────────────────────────────────
-UNIFI_CONTROLLER_URL="${found_url}"
-UNIFI_USERNAME=${USER_Q}
-UNIFI_PASSWORD=${PASS_Q}
+UNIFI_CONTROLLER_URL="${URL_Q}"
+UNIFI_USERNAME="${USER_Q}"
+UNIFI_PASSWORD="${PASS_Q}"
 # UniFi always creates a site named "default". If the administrator renamed it,
 # edit this value to match the exact site name shown in the UniFi controller.
 UNIFI_SITE="default"
@@ -473,9 +510,9 @@ ACL_MAC_PATH=/etc/acl/acl_mac
 ACL_DHCP_PATH=/etc/acl/acl_dhcp
 ACL_MAC_PROXY=/etc/acl/acl_mac/mac-proxy.txt
 ACL_MAC_UNLIMITED=/etc/acl/acl_mac/mac-unlimited.txt
-ACL_MAC_HOTSPOT=/etc/uhotspot/mac-hotspot.txt
 ACL_BLOCK_FILE=/etc/acl/acl_dhcp/blockdhcp.txt
-ACL_GRACE_FILE=/etc/acl/acl_dhcp/gracedhcp.txt
+ACL_GRACE_FILE=/etc/uhotspot/acl/ugrace.txt
+ACL_MAC_HOTSPOT=/etc/uhotspot/acl/umacauth.txt
 
 # ── Daemon & DHCP timers ─────────────────────────────────────────────────────
 POLL_INTERVAL=${CFG_POLL_INTERVAL}
@@ -496,19 +533,53 @@ EOF
 
 # ─── Filesystem layout ───────────────────────────────────────────────────────
 deploy_directories() {
-    mkdir -p "$HOTSPOT_DIR" "$TOOLS_DIR"
+    mkdir -p "$HOTSPOT_DIR" "$CORE_DIR" "$TOOLS_DIR" "$ACL_DIR"
     chmod 700 "$HOTSPOT_DIR"
+    chmod 700 "$CORE_DIR"
     chmod 700 "$TOOLS_DIR"
+    chmod 700 "$ACL_DIR"
     info "Directories created"
 }
 
+deploy_acl_files() {
+    # Own data files (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt) —
+    # repo ships them as empty templates. Copy once and never overwrite an
+    # existing one, on install or update, so real ACL/voucher/queue data
+    # already on disk is never touched.
+    #
+    # $1: "warn" logs a WARNING per missing file before creating it empty
+    # (used by --update, where a missing ACL file means a partial/broken
+    # install and is worth flagging); default is quiet (used by a fresh
+    # install, where creating them is the expected, normal case).
+    local report_mode="${1:-quiet}"
+    local f dest
+    for f in "${REPO_ACL}/"*.txt; do
+        dest="${ACL_DIR}/$(basename "$f")"
+        if [[ -f "$dest" ]]; then
+            continue
+        fi
+        [[ "$report_mode" == "warn" ]] && warn "$(basename "$dest") missing — creating empty"
+        install -m 600 -o root -g root "$f" "$dest"
+    done
+    info "ACL data files present in ${ACL_DIR}"
+}
+
 deploy_scripts() {
-    install -m 755 -o root -g root "$REPO_UHOTSPOTD" "${HOTSPOT_DIR}/uhotspotd.sh"
+    install -m 755 -o root -g root "$REPO_UHOTSPOTD" "${CORE_DIR}/uhotspotd.sh"
+    install -m 755 -o root -g root "${REPO_CORE}/ureload.sh" "${CORE_DIR}/ureload.sh"
+    install -m 755 -o root -g root "${REPO_CORE}/uleases.sh" "${CORE_DIR}/uleases.sh"
     local f
     for f in "${REPO_TOOLS}/"*.sh; do
+        # uiptables_example.sh is a reference template for the administrator
+        # to adapt manually into tools/uiptables.sh (see deploy_uiptables_stub)
+        # — never deployed as-is.
         [[ "$(basename "$f")" == "uiptables_example.sh" ]] && continue
         install -m 755 -o root -g root "$f" "${TOOLS_DIR}/"
     done
+    # Remove any copy left at the pre-restructure locations (directly under
+    # $HOTSPOT_DIR / $TOOLS_DIR instead of core/), so at most one copy of
+    # each script exists on disk.
+    rm -f "${HOTSPOT_DIR}/uhotspotd.sh" "${TOOLS_DIR}/ureload.sh" "${TOOLS_DIR}/uleases.sh"
     info "Scripts deployed to ${HOTSPOT_DIR}"
 }
 
@@ -520,6 +591,10 @@ deploy_uiptables_stub() {
     cat > "$UIPTABLES_STUB" <<'STUB'
 #!/bin/bash
 # /etc/uhotspot/tools/uiptables.sh
+# UHOTSPOT_STUB_MARKER — do not remove this line while the script is
+# unconfigured; ureload.sh looks for it to skip the reload gracefully
+# instead of treating this stub's exit 1 as a real failure. It is removed
+# automatically once you replace this file's content with real rules.
 #
 # Firewall rules for uhotspot. Invoked by ureload.sh after every ACL change.
 #
@@ -528,7 +603,7 @@ deploy_uiptables_stub() {
 #
 # The script must do two things:
 #   1. Flush and repopulate the ipsets `macgrace` and `machotspot` from the
-#      ACL files at /etc/acl/acl_dhcp/gracedhcp.txt and /etc/uhotspot/mac-hotspot.txt
+#      ACL files at /etc/uhotspot/acl/ugrace.txt and /etc/uhotspot/acl/umacauth.txt
 #   2. Apply (idempotently) the iptables rules that consume those ipsets.
 #
 # Without this script populated, ACL changes will not reach the firewall and
@@ -543,9 +618,14 @@ STUB
 }
 
 install_logrotate() {
+    # $1: "warn" logs a WARNING before creating a missing logrotate config
+    # (used by --update, where this should already exist); default is quiet
+    # (used by a fresh install, where creating it is the expected case).
+    local report_mode="${1:-quiet}"
     if [[ -f "$LOGROTATE_FILE" ]]; then
         info "logrotate config already present at $LOGROTATE_FILE"
     else
+        [[ "$report_mode" == "warn" ]] && warn "$(basename "$LOGROTATE_FILE") missing — creating it"
         cat > "$LOGROTATE_FILE" <<EOF
 ${LOG_FILE} {
     daily
@@ -562,33 +642,25 @@ EOF
     fi
 }
 
-register_cron() {
-    # uhotspotd runs as a systemd service — no cron entry needed for it.
-    # Only the hourly ureload.sh trigger is registered here.
-    local ureload_path="${HOTSPOT_DIR}/tools/ureload.sh"
-    local expected_hourly="@hourly flock -w 60 /var/lock/uhotspot.lock -c '${ureload_path}'"
-    local current
-    current=$(crontab -l 2>/dev/null || true)
-    local changed=0
-
-    if echo "$current" | grep -qF "$expected_hourly"; then
-        info "Cron entry (ureload @hourly) already present"
-    elif echo "$current" | grep -qF "$ureload_path"; then
-        warn "Crontab contains entries for $ureload_path in a different format — review manually"
-    else
-        current=$(printf '%s\n%s\n' "$current" "$expected_hourly")
-        info "Cron entry registered: $expected_hourly"
-        changed=1
+deregister_cron() {
+    # uhotspotd triggers its own safety-net reload internally (see
+    # RELOAD_SAFETY_INTERVAL_SECONDS in uhotspotd.sh) — no external cron
+    # entry should exist. Removes a leftover @hourly ureload.sh entry if
+    # found, matching both the current core/ureload.sh path and the
+    # pre-restructure tools/ureload.sh path.
+    local ureload_path_new="${HOTSPOT_DIR}/core/ureload.sh"
+    local ureload_path_old="${HOTSPOT_DIR}/tools/ureload.sh"
+    if crontab -l 2>/dev/null | grep -qF -e "$ureload_path_new" -e "$ureload_path_old"; then
+        crontab -l 2>/dev/null | grep -vF -e "$ureload_path_new" -e "$ureload_path_old" | crontab - || true
+        info "Removed stale @hourly ureload.sh cron entry (now handled by uhotspotd.sh internally)"
     fi
-
-    if (( changed )); then echo "$current" | crontab -; fi
 }
 
 final_sanity_check() {
     step "Sanity check"
     local issues=0
 
-    if [[ ! -x "$UIPTABLES_STUB" ]] || grep -q "not configured" "$UIPTABLES_STUB" 2>/dev/null; then
+    if [[ ! -x "$UIPTABLES_STUB" ]] || grep -qF "UHOTSPOT_STUB_MARKER" "$UIPTABLES_STUB" 2>/dev/null; then
         warn "uiptables.sh is not configured — ACL changes will not reach the firewall"
         (( issues++ )) || true
     fi
@@ -616,7 +688,7 @@ do_install() {
     echo "  uhotspot — installer"
     echo "══════════════════════════════════════════════════════"
 
-    if [[ -f "${HOTSPOT_DIR}/uhotspotd.sh" ]]; then
+    if [[ -f "${CORE_DIR}/uhotspotd.sh" ]]; then
         abort "uhotspot is already installed at ${HOTSPOT_DIR}.
   Use --update to upgrade (keeps config), or --remove to remove first."
     fi
@@ -628,6 +700,7 @@ do_install() {
     step "Filesystem layout"
     deploy_directories
     deploy_scripts
+    deploy_acl_files
     deploy_uiptables_stub
 
     run_setup_wizard
@@ -639,7 +712,7 @@ do_install() {
     install_systemd_service
 
     step "Cron"
-    register_cron
+    deregister_cron
 
     final_sanity_check
 
@@ -666,7 +739,11 @@ do_update() {
     check_distro
     check_repo_files
 
-    if [[ ! -d "$HOTSPOT_DIR" || ! -f "${HOTSPOT_DIR}/uhotspotd.sh" ]]; then
+    # Accepts either the current core/ layout or the pre-restructure layout
+    # (uhotspotd.sh directly under $HOTSPOT_DIR, ureload.sh/uleases.sh under
+    # $TOOLS_DIR), so an update from an old install isn't mistaken for a
+    # fresh one.
+    if [[ ! -d "$HOTSPOT_DIR" ]] || { [[ ! -f "${CORE_DIR}/uhotspotd.sh" ]] && [[ ! -f "${HOTSPOT_DIR}/uhotspotd.sh" ]]; }; then
         abort "uhotspot not installed. Run without --update first."
     fi
 
@@ -674,32 +751,95 @@ do_update() {
     local backup_dir
     backup_dir="/etc/uhotspot.bak/$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$backup_dir"
+    cp -p "${CORE_DIR}/"*.sh "$backup_dir/" 2>/dev/null || true
     cp -p "${HOTSPOT_DIR}/uhotspotd.sh" "$backup_dir/" 2>/dev/null || true
     cp -p "${TOOLS_DIR}/"*.sh "$backup_dir/" 2>/dev/null || true
     info "Current scripts backed up to $backup_dir"
 
+    step "Pause services"
+    # Stop whatever is actively running its own script file before that file
+    # gets overwritten below — avoids replacing a script out from under a
+    # process that may still be mid-cycle. pydhcpd is deliberately left
+    # alone: it is a separate project this update never modifies, and
+    # stopping it would cut DHCP for the whole LAN, not just the hotspot.
+    local uwatch_path="${TOOLS_DIR}/uwatch.sh"
+    local _uhotspotd_was_active=0 _ualert_was_active=0 _uwatch_was_active=0
+    systemctl is-active --quiet uhotspotd 2>/dev/null && _uhotspotd_was_active=1
+    if [[ -f /etc/systemd/system/ualert.service ]]; then
+        systemctl is-active --quiet ualert 2>/dev/null && _ualert_was_active=1
+    fi
+    if crontab -l 2>/dev/null | awk -v p="$uwatch_path" '(index($0,p)>0 && substr($0,1,1)!="#"){f=1} END{exit !f}'; then
+        _uwatch_was_active=1
+    fi
+
+    if (( _uhotspotd_was_active )); then
+        systemctl stop uhotspotd && info "uhotspotd stopped for update" || warn "Could not stop uhotspotd — continuing anyway"
+    fi
+    if (( _ualert_was_active )); then
+        systemctl stop ualert && info "ualert stopped for update" || warn "Could not stop ualert — continuing anyway"
+    fi
+    if (( _uwatch_was_active )); then
+        crontab -l 2>/dev/null | awk -v p="$uwatch_path" '(index($0,p)>0 && substr($0,1,1)!="#"){print "#" $0; next} {print}' | crontab -
+        info "uwatch cron entry commented out for update"
+    fi
+
     step "Deploy updated scripts"
     deploy_scripts
+
+    step "ACL data files"
+    # ACL_DIR (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt), CONFIG_FILE
+    # and UIPTABLES_STUB are the administrator's own live/customized data.
+    # --update never renames, moves or overwrites anything already present —
+    # deploy_acl_files()/deploy_uiptables_stub() below only create what's
+    # missing (e.g. a partial/broken install, warning about it since that
+    # should not normally happen) and leave every existing file untouched.
+    # No unconditional mkdir/chmod on an already-existing ACL_DIR either;
+    # only created (and chmod 700) here if it doesn't exist yet.
+    [[ -d "$ACL_DIR" ]] || { mkdir -p "$ACL_DIR"; chmod 700 "$ACL_DIR"; }
+    deploy_acl_files warn
+    deploy_uiptables_stub
+
+    step "Logrotate"
+    install_logrotate warn
 
     step "Systemd service"
     install -m 644 -o root -g root "$REPO_SERVICE" "$SERVICE_DEST"
     systemctl daemon-reload
-    systemctl restart uhotspotd && info "uhotspotd restarted" || warn "Could not restart uhotspotd — check: systemctl status uhotspotd"
+    if (( _uhotspotd_was_active )); then
+        systemctl restart uhotspotd && info "uhotspotd restarted" || warn "Could not restart uhotspotd — check: systemctl status uhotspotd"
+    else
+        info "uhotspotd was not active before the update — leaving it stopped"
+    fi
+
+    step "Resume services"
+    # Only restore what this update itself paused above — never start
+    # something the administrator had deliberately left stopped/disabled.
+    if (( _ualert_was_active )); then
+        systemctl start ualert && info "ualert restarted" || warn "Could not restart ualert — check: systemctl status ualert"
+    fi
+    if (( _uwatch_was_active )); then
+        crontab -l 2>/dev/null | awk -v p="$uwatch_path" '(substr($0,1,1)=="#" && index($0,p)>0){print substr($0,2); next} {print}' | crontab -
+        info "uwatch cron entry restored"
+    fi
 
     step "Cron"
-    register_cron
+    deregister_cron
 
     echo ""
     echo "══════════════════════════════════════════════════════"
     echo "  Update complete."
     echo ""
-    echo "  Preserved (not modified):"
+    echo "  Preserved (never renamed/moved/overwritten if already present):"
     echo "    - ${CONFIG_FILE}"
     echo "    - ${UIPTABLES_STUB}"
     echo "    - ACL data files (*.txt)"
     echo "    - Logrotate config"
     echo ""
-    echo "  Cron entries reconciled (missing entries added; existing ones untouched)"
+    echo "  Paused for the update, then resumed to their prior state:"
+    echo "    - uhotspotd.service, ualert.service (if it was active)"
+    echo "    - uwatch cron entry (if it was active)"
+    echo ""
+    echo "  Stale @hourly ureload.sh cron entry removed if present"
     echo ""
 
     echo "  Backup: $backup_dir"
@@ -716,7 +856,8 @@ do_remove() {
 
     echo ""
     echo "  The following actions will be offered (each with confirmation):"
-    echo "    • Remove cron entries pointing to ${HOTSPOT_DIR}/tools/ureload.sh"
+    echo "    • Remove cron entries pointing to ${HOTSPOT_DIR}/core/ureload.sh"
+    echo "    • Stop and remove ualert.service and the uwatch cron entry (if installed)"
     echo "    • Remove ${LOGROTATE_FILE}"
     echo "    • Remove ${HOTSPOT_DIR} (includes uhotspot.conf, ACLs, uiptables.sh)"
     echo "    • Remove ${LOG_FILE} and rotated logs"
@@ -745,16 +886,48 @@ do_remove() {
 
     # Cron entries
     step "Cron"
-    local ureload_path="${HOTSPOT_DIR}/tools/ureload.sh"
-    if crontab -l 2>/dev/null | grep -qF "$ureload_path"; then
+    # Matches both the current core/ureload.sh path and the pre-restructure
+    # tools/ureload.sh path.
+    local ureload_path="${HOTSPOT_DIR}/core/ureload.sh"
+    local ureload_path_old="${HOTSPOT_DIR}/tools/ureload.sh"
+    if crontab -l 2>/dev/null | grep -qF -e "$ureload_path" -e "$ureload_path_old"; then
         if confirm "Remove cron entries for $ureload_path?" "y"; then
-            crontab -l 2>/dev/null | grep -vF "$ureload_path" | crontab - || true
+            crontab -l 2>/dev/null | grep -vF -e "$ureload_path" -e "$ureload_path_old" | crontab - || true
             info "Cron entries removed"
         else
             warn "Cron entries preserved"
         fi
     else
         info "No cron entries found"
+    fi
+
+    # ualert (optional component)
+    step "ualert"
+    if [[ -f /etc/systemd/system/ualert.service ]]; then
+        if confirm "Stop, disable and remove ualert.service?" "y"; then
+            systemctl disable --now ualert 2>/dev/null || true
+            rm -f /etc/systemd/system/ualert.service
+            systemctl daemon-reload
+            info "ualert.service removed"
+        else
+            warn "ualert.service preserved"
+        fi
+    else
+        info "ualert.service not installed"
+    fi
+
+    # uwatch (optional component)
+    step "uwatch"
+    local uwatch_path="${TOOLS_DIR}/uwatch.sh"
+    if crontab -l 2>/dev/null | grep -qF "$uwatch_path"; then
+        if confirm "Remove uwatch cron entry?" "y"; then
+            crontab -l 2>/dev/null | grep -vF "$uwatch_path" | crontab - || true
+            info "uwatch cron entry removed"
+        else
+            warn "uwatch cron entry preserved"
+        fi
+    else
+        info "No uwatch cron entry found"
     fi
 
     # Logrotate
@@ -771,7 +944,7 @@ do_remove() {
     if [[ -d "$HOTSPOT_DIR" ]]; then
         echo "  This will delete:"
         echo "    - $CONFIG_FILE (credentials)"
-        echo "    - ${HOTSPOT_DIR}/mac-hotspot.txt, guest-wellknow.txt (ACLs)"
+        echo "    - ${ACL_DIR}/ (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt)"
         echo "    - $UIPTABLES_STUB (YOUR firewall script — back it up first if needed)"
         echo "    - All other contents of $HOTSPOT_DIR"
         if confirm "Remove $HOTSPOT_DIR entirely?" "n"; then
@@ -821,7 +994,7 @@ Modes:
                  detected UniFi Network version (package "unifi", classic
                  or embedded in unifi-os) is below the minimum tested
                  (>= 10.4.57).
-  --update       Update scripts only (preserves config, ACLs, cron, firewall).
+  --update       Update scripts only (preserves config, ACLs, firewall).
   --remove       Uninstall uhotspot (interactive, with confirmations).
   --help, -h     Show this help.
 

@@ -11,6 +11,14 @@
 #   uhotspot.conf, default 20) with a persistent UniFi API session and CSRF
 #   token shared across all calls within a cycle.
 #
+#   CONTROLLER TYPE (UNIFI_TYPE in uhotspot.conf):
+#   Supports both "unifi-os" (UDM/UDM-Pro/UDR/Cloud Key Gen2+, login via
+#   /api/auth/login, TOKEN cookie, CSRF from the JWT payload) and "classic"
+#   (self-hosted UniFi Network Application, login via /api/login, unifises
+#   cookie, CSRF from the response header). _session_cookie_name() and
+#   unifi_login() branch on this value; api_path() branches the API prefix
+#   the same way.
+#
 #   Session tokens are persisted to TOKEN_STATE_FILE (/run/uhotspotd_session)
 #   so that re-authentication inside $(...) subshells propagates correctly to
 #   subsequent API calls in the same cycle.
@@ -37,26 +45,27 @@
 #                    before DEDUP so its blockdhcp.txt changes are detected
 #                    by RELOAD, step 12)
 #   3. DEDUP       — cross-list consistency check, blockdhcp cleanup
-#   4. SORT        — sort mac-hotspot.txt by IP
-#   5. CLEAN MACS  — remove mac-*.txt entries from mac-hotspot
-#   6. EXPIRED     — remove expired mac-hotspot entries (hotspot IPs freed)
-#   7. NEW LEASES  — scan pydhcpd.leases; any MAC not yet in mac-hotspot/
-#                    mac-*/blockdhcp/gracedhcp/guest-wellknow is written
-#                    directly into gracedhcp.txt with a first-seen timestamp —
-#                    the same role guest-pending.txt played in the
-#                    pre-simplification design. Unlike guest-pending.txt, no
-#                    fixed hotspot-range IP is assigned and no lease removal
-#                    is queued: grace clients keep their existing pydhcpd
-#                    pool lease. Writing gracedhcp.txt is enough to trigger
-#                    RELOAD (step 12), which invokes uleases.sh to do the
-#                    actual classification/expiry/blocking of grace entries.
-#   8. SESSIONS    — promote voucher-authenticated clients to mac-hotspot
-#   9. REVOKE      — remove UniFi-unauthorized clients from mac-hotspot
+#   4. SORT        — sort umacauth.txt by IP
+#   5. CLEAN MACS  — remove mac-*.txt entries from umacauth
+#   6. EXPIRED     — remove expired umacauth entries (hotspot IPs freed)
+#   7. NEW LEASES  — scan pydhcpd.leases; any MAC not yet in umacauth/
+#                    mac-*/blockdhcp/ugrace/umacbak is written
+#                    directly into ugrace.txt with a first-seen timestamp.
+#                    No fixed hotspot-range IP is assigned and no lease
+#                    removal is queued: grace clients keep their existing
+#                    pydhcpd pool lease. Writing ugrace.txt is enough to
+#                    trigger RELOAD (step 12), which invokes uleases.sh to
+#                    do the actual classification/expiry/blocking of grace
+#                    entries.
+#   8. SESSIONS    — promote voucher-authenticated clients to umacauth
+#   9. REVOKE      — remove UniFi-unauthorized clients from umacauth
 #  10. AUTHORIZE   — re-authorize managed MACs (mac-*.txt) seen on HOTSPOT_ESSID
 #                    that UniFi reports as unauthorized; checked every cycle so
 #                    reconnecting devices are covered automatically
-#  11. BACKUP      — update guest-wellknow.txt, clean blockdhcp conflicts
-#  12. RELOAD      — invoke SERVER_RELOAD_SCRIPT if ACLs changed
+#  11. BACKUP      — update umacbak.txt, clean blockdhcp conflicts
+#  12. RELOAD      — invoke SERVER_RELOAD_SCRIPT if ACLs changed, or once per
+#                    RELOAD_SAFETY_INTERVAL_SECONDS regardless (safety net for
+#                    idle networks — grace->block promotion, firewall self-heal)
 #  13. KICK        — force reassociation of newly-authorized clients still
 #                    connected, so they pick up their new fixed IP right away
 #
@@ -65,6 +74,16 @@
 # CONFIG:  /etc/uhotspot/uhotspot.conf
 # LOG:     /var/log/uhotspot.log
 # SERVICE: systemctl status uhotspotd
+#
+# LOCATION:
+#   Installed at /etc/uhotspot/core/uhotspotd.sh, alongside uhotspotd.service,
+#   ureload.sh and uleases.sh — these four are the reload mechanism itself,
+#   not auxiliary tools. /etc/uhotspot/tools/ holds independent, optional
+#   scripts uhotspot runs fine without (uaudit.sh, ucheck.sh, uhotspotmon.sh,
+#   uwatch.sh, ualert.sh, plus the admin-provided uiptables.sh). The reload
+#   script path itself is read from SERVER_RELOAD_SCRIPT in uhotspot.conf
+#   (set by usetup.sh, default /etc/uhotspot/core/ureload.sh) — nothing here
+#   hardcodes it, so relocating core/ only requires updating that one value.
 #
 ################################################################################
 
@@ -83,9 +102,10 @@ fi
 # CYCLE_LOCK is separate from SCRIPT_LOCK (the singleton instance guard, held
 # for the daemon's entire lifetime). CYCLE_LOCK is only held while run_cycle
 # is actively mutating ACL files (~1-3s), released during the sleep between
-# cycles. uleases.sh's cron-triggered guard checks THIS lock, not SCRIPT_LOCK,
-# so the cron reload isn't blocked for the daemon's entire uptime — only
-# during the narrow window where a real race on the ACL files could occur.
+# cycles. A manual, standalone run of uleases.sh (UHOTSPOT_RELOAD_ACTIVE
+# unset) checks THIS lock, not SCRIPT_LOCK, so it only waits during the
+# narrow window where a real race on the ACL files could occur — not for
+# the daemon's entire uptime.
 CYCLE_LOCK="/var/lock/uhotspotd-cycle.lock"
 exec 201>"$CYCLE_LOCK"
 
@@ -113,9 +133,9 @@ LOG_FILE="/var/log/uhotspot.log"
 HOTSPOT_PATH="/etc/uhotspot"
 CONFIG_FILE="$HOTSPOT_PATH/uhotspot.conf"
 ACL_MAC_PATH="/etc/acl/acl_mac"
-MAC_LIST="$HOTSPOT_PATH/mac-hotspot.txt"
+MAC_LIST="$HOTSPOT_PATH/acl/umacauth.txt"
 BLOCK_DHCP="/etc/acl/acl_dhcp/blockdhcp.txt"
-LEASE_REMOVE_QUEUE="$HOTSPOT_PATH/leases-remove-queue.txt"
+LEASE_REMOVE_QUEUE="$HOTSPOT_PATH/acl/uqueue.txt"
 PYDHCPD_LEASES="/etc/pydhcp/pydhcpd.leases"
 
 TOKEN_STATE_FILE="/run/uhotspotd_session"
@@ -139,6 +159,13 @@ _ACL_SNAPSHOT_BLOCK=""
 _ACL_SNAPSHOT_QUEUE=""
 _ACL_SNAPSHOT_GRACE=""
 _RELOAD_OK=0
+# Safety-net reload: forces SERVER_RELOAD_SCRIPT even without an ACL diff,
+# on this cadence, so idle networks still get grace->block promotion and the
+# firewall self-heals without depending on an external cron entry (see
+# check_and_reload_if_changed). Default set in main(), alongside
+# POLL_INTERVAL; overridable via RELOAD_SAFETY_INTERVAL_SECONDS in
+# uhotspot.conf.
+_LAST_RELOAD_EPOCH=0
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # _CYCLE_MARKED tracks whether the delimiter line has already been printed
@@ -205,8 +232,8 @@ load_config() {
         exit 1
     fi
 
-    if [[ "${UNIFI_TYPE:-}" == "classic" ]]; then
-        log "ERROR: UNIFI_TYPE=classic is not supported by this daemon (login uses TOKEN cookie, classic controllers use unifises). Set UNIFI_TYPE=unifi-os or use uaudit.sh for classic controllers."
+    if [[ "${UNIFI_TYPE:-}" != "unifi-os" && "${UNIFI_TYPE:-}" != "classic" ]]; then
+        log "ERROR: UNIFI_TYPE must be 'unifi-os' or 'classic', got: ${UNIFI_TYPE:-unset}"
         exit 1
     fi
 }
@@ -220,10 +247,22 @@ verify_installation() {
         log "ERROR: SERVER_RELOAD_SCRIPT not executable: $SERVER_RELOAD_SCRIPT"
         exit 1
     fi
-    if ! systemctl is-active --quiet pydhcpd 2>/dev/null; then
-        log "ERROR: pydhcpd is not active"
-        exit 1
-    fi
+    # pydhcpd often boots alongside this host and may not be up yet — give it
+    # the same startup grace as the UniFi login below instead of failing
+    # instantly. RestartSec=10 + StartLimitBurst=10 in the unit file means an
+    # instant failure here would exhaust the restart budget in ~100s and
+    # leave the daemon permanently down (start-limit-hit) if pydhcpd takes
+    # longer than that to come up.
+    local _pydhcpd_start _pydhcpd_elapsed
+    _pydhcpd_start=$(date +%s)
+    until systemctl is-active --quiet pydhcpd 2>/dev/null; do
+        _pydhcpd_elapsed=$(( $(date +%s) - _pydhcpd_start ))
+        if (( _pydhcpd_elapsed >= STARTUP_GRACE_SECONDS )); then
+            log "ERROR: pydhcpd is not active after ${STARTUP_GRACE_SECONDS}s"
+            exit 1
+        fi
+        sleep 10
+    done
     log "INFO: Installation verified"
 }
 
@@ -233,7 +272,7 @@ init_acl_files() {
     touch "$MAC_LIST" "$BLOCK_DHCP"
     chmod 600 "$MAC_LIST" "$BLOCK_DHCP"
 
-    local grace_file="${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}"
+    local grace_file="${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}"
     mkdir -p "$(dirname "$grace_file")"
     touch "$grace_file"
     chmod 600 "$grace_file"
@@ -255,6 +294,16 @@ api_path() {
     fi
 }
 
+# Session cookie name differs by controller type: classic uses "unifises",
+# unifi-os uses "TOKEN" (a JWT).
+_session_cookie_name() {
+    if [[ "$UNIFI_TYPE" == "classic" ]]; then
+        echo "unifises"
+    else
+        echo "TOKEN"
+    fi
+}
+
 _save_session() {
     ( umask 077; printf '%s\n%s\n' "$SESSION_TOKEN" "$CSRF_TOKEN" > "$TOKEN_STATE_FILE" ) 2>/dev/null || true
     chmod 600 "$TOKEN_STATE_FILE" 2>/dev/null || true
@@ -271,10 +320,11 @@ _load_session() {
 _update_session_from_headers() {
     local hfile="$1"
     [[ ! -f "$hfile" ]] && return
-    local new_tok new_csrf changed=0
-    new_tok=$(grep -iE '^set-cookie:[[:space:]]*TOKEN=' "$hfile" \
+    local new_tok new_csrf changed=0 cookie_name
+    cookie_name=$(_session_cookie_name)
+    new_tok=$(grep -iE "^set-cookie:[[:space:]]*${cookie_name}=" "$hfile" \
         | head -1 \
-        | sed -E 's/^[^:]+:[[:space:]]*TOKEN=([^;]+).*/\1/' \
+        | sed -E "s/^[^:]+:[[:space:]]*${cookie_name}=([^;]+).*/\1/" \
         | tr -d '\r\n' || true)
     new_csrf=$(grep -iE '^(x-updated-csrf-token|x-csrf-token):' "$hfile" | tail -1 \
         | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '\r\n' || true)
@@ -324,14 +374,15 @@ unifi_login() {
         return 1
     fi
 
-    local new_csrf new_tok
-    new_tok=$(grep -iE '^set-cookie:[[:space:]]*TOKEN=' "$header_file" \
+    local new_csrf new_tok cookie_name
+    cookie_name=$(_session_cookie_name)
+    new_tok=$(grep -iE "^set-cookie:[[:space:]]*${cookie_name}=" "$header_file" \
         | head -1 \
-        | sed -E 's/^[^:]+:[[:space:]]*TOKEN=([^;]+).*/\1/' \
+        | sed -E "s/^[^:]+:[[:space:]]*${cookie_name}=([^;]+).*/\1/" \
         | tr -d '\r\n' || true)
 
     if [[ -z "$new_tok" ]]; then
-        log "ERROR: Login OK but TOKEN cookie not found"
+        log "ERROR: Login OK but ${cookie_name} cookie not found"
         rm -f "$header_file"
         return 1
     fi
@@ -373,7 +424,7 @@ api_get() {
     TEMP_FILES_TO_CLEAN+=("$hdr")
 
     local args=(-sk -w "\n__CODE__:%{http_code}" -D "$hdr"
-        -H "Cookie: TOKEN=${SESSION_TOKEN}")
+        -H "Cookie: $(_session_cookie_name)=${SESSION_TOKEN}")
     [[ -n "$CSRF_TOKEN" ]] && args+=(-H "x-csrf-token: $CSRF_TOKEN")
 
     local raw code body
@@ -392,7 +443,7 @@ api_get() {
         fi
         _load_session
         args=(-sk -w "\n__CODE__:%{http_code}" -D "$hdr"
-            -H "Cookie: TOKEN=${SESSION_TOKEN}")
+            -H "Cookie: $(_session_cookie_name)=${SESSION_TOKEN}")
         [[ -n "$CSRF_TOKEN" ]] && args+=(-H "x-csrf-token: $CSRF_TOKEN")
         raw=$(curl --max-time 30 "${args[@]}" "$url" 2>/dev/null || true)
         code=$(echo "$raw" | grep '__CODE__:' | cut -d: -f2 | tr -d '\r\n')
@@ -427,7 +478,7 @@ api_post() {
     local args=(-sk -w "\n__CODE__:%{http_code}" -D "$hdr"
         -X POST
         -H "Content-Type: application/json"
-        -H "Cookie: TOKEN=${SESSION_TOKEN}")
+        -H "Cookie: $(_session_cookie_name)=${SESSION_TOKEN}")
     [[ -n "$CSRF_TOKEN" ]] && args+=(-H "x-csrf-token: $CSRF_TOKEN")
 
     local raw code
@@ -447,7 +498,7 @@ api_post() {
         args=(-sk -w "\n__CODE__:%{http_code}" -D "$hdr"
             -X POST
             -H "Content-Type: application/json"
-            -H "Cookie: TOKEN=${SESSION_TOKEN}")
+            -H "Cookie: $(_session_cookie_name)=${SESSION_TOKEN}")
         [[ -n "$CSRF_TOKEN" ]] && args+=(-H "x-csrf-token: $CSRF_TOKEN")
         raw=$(curl --max-time 30 "${args[@]}" -d "$payload" "$url" 2>/dev/null || true)
         code=$(echo "$raw" | grep '__CODE__:' | cut -d: -f2 | tr -d '\r\n')
@@ -600,7 +651,7 @@ dedup_mac_lists() {
 }
 
 # ── Step 5: clean managed MACs from hotspot lists ─────────────────────────────
-# Removes any MAC present in mac-*.txt from mac-hotspot.
+# Removes any MAC present in mac-*.txt from umacauth.
 clean_managed_macs() {
     [[ -z "$MANAGED_MACS" ]] && return
     local removed=0 tmp
@@ -695,13 +746,13 @@ add_mac_to_acl() {
 expire_from_hotspot() {
     local mac="$1"
     # Release the hotspot-range IP. On reconnect, uleases.sh detects the client
-    # via pydhcpd.leases; if the MAC is in guest-wellknow.txt the lease is kept
-    # without a new grace timer, otherwise the client enters gracedhcp.txt.
+    # via pydhcpd.leases; if the MAC is in umacbak.txt the lease is kept
+    # without a new grace timer, otherwise the client enters ugrace.txt.
     if ! queue_lease_removal "$mac"; then
         log "WARNING: Expire $mac — failed to queue lease removal, will retry"
         return 1
     fi
-    log "INFO: Expired $mac — released from mac-hotspot.txt"
+    log "INFO: Expired $mac — released from umacauth.txt"
     return 0
 }
 
@@ -748,24 +799,23 @@ clean_expired_macs() {
 }
 
 # ── Step 7: detect new clients in pydhcpd.leases ──────────────────────────────
-# Plays the role guest-pending.txt used to play in the pre-simplification
-# design: scans pydhcpd.leases for MACs that aren't yet known to any ACL
-# source (mac-hotspot, mac-*, blockdhcp, gracedhcp, guest-wellknow) and writes
-# them straight into gracedhcp.txt with a first-seen timestamp.
+# Scans pydhcpd.leases for MACs that aren't yet known to any ACL source
+# (umacauth, mac-*, blockdhcp, ugrace, umacbak) and writes them straight
+# into ugrace.txt with a first-seen timestamp.
 #
-# Unlike the old guest-pending.txt flow, no fixed hotspot-range IP is assigned
-# here and no lease removal is queued — gracedhcp clients keep their existing
-# pydhcpd pool lease until they enter a voucher or their grace timer expires
-# (handled by uleases.sh). Writing gracedhcp.txt is enough to be picked up by
-# the snapshot taken in step 2, so check_and_reload_if_changed (step 12)
-# detects the change and triggers SERVER_RELOAD_SCRIPT, which runs uleases.sh
-# to do the actual classification/expiry/blocking of grace entries.
+# No fixed hotspot-range IP is assigned here and no lease removal is
+# queued — ugrace clients keep their existing pydhcpd pool lease until they
+# enter a voucher or their grace timer expires (handled by uleases.sh).
+# Writing ugrace.txt is enough to be picked up by the snapshot taken in
+# step 2, so check_and_reload_if_changed (step 12) detects the change and
+# triggers SERVER_RELOAD_SCRIPT, which runs uleases.sh to do the actual
+# classification/expiry/blocking of grace entries.
 process_new_leases() {
     [[ ! -f "$PYDHCPD_LEASES" ]] && return
 
     local grace_file wellknow_file
-    grace_file="${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}"
-    wellknow_file="$(dirname "$MAC_LIST")/guest-wellknow.txt"
+    grace_file="${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}"
+    wellknow_file="$(dirname "$MAC_LIST")/umacbak.txt"
 
     local added=0
     local current_lease="" lease_content=""
@@ -793,7 +843,7 @@ process_new_leases() {
                && ! grep -qxiF "$mac" "$wellknow_file"  2>/dev/null \
                && ! echo "$MANAGED_MACS" | grep -qi "^${mac}$"; then
                 echo "a;${mac};${ip};${host};$(date +%s);" >> "$grace_file"
-                log "INFO: New client $mac ip=$ip hostname=$host → gracedhcp.txt"
+                log "INFO: New client $mac ip=$ip hostname=$host → ugrace.txt"
                 (( added++ )) || true
             fi
             current_lease=""
@@ -803,12 +853,12 @@ process_new_leases() {
 
     if (( added > 0 )); then
         chmod 600 "$grace_file" 2>/dev/null || true
-        log "INFO: process_new_leases → added $added new client(s) to gracedhcp.txt"
+        log "INFO: process_new_leases → added $added new client(s) to ugrace.txt"
     fi
 }
 
 # ── Step 8: process sessions ──────────────────────────────────────────────────
-# Queries stat/guest. Promotes voucher-authenticated clients to mac-hotspot.txt.
+# Queries stat/guest. Promotes voucher-authenticated clients to umacauth.txt.
 # MACs in mac-*.txt are skipped even if they entered a voucher.
 process_sessions() {
     local endpoint sessions_data rc added=0
@@ -939,7 +989,7 @@ revoke_unauthorized() {
             log "ERROR: revoke_unauthorized: refusing malformed MAC '$mac' — skipping"
             continue
         fi
-        log "INFO: Revoking $mac — authorized=false in UniFi; releasing from mac-hotspot"
+        log "INFO: Revoking $mac — authorized=false in UniFi; releasing from umacauth"
         queue_lease_removal "$mac"
         if sed -i "/^a;${mac};/Id" "$MAC_LIST" 2>/dev/null; then
             (( revoked++ )) || true
@@ -1010,12 +1060,13 @@ authorize_managed_macs() {
 # ── Step 11: backup ───────────────────────────────────────────────────────────
 mac_hotspot_backup() {
     local wellknow_file current_macs new_macs merged_macs
-    wellknow_file="$(dirname "$MAC_LIST")/guest-wellknow.txt"
+    wellknow_file="$(dirname "$MAC_LIST")/umacbak.txt"
     new_macs=$(awk -F';' '/^a;/{print $2}' "$MAC_LIST" | sort -u)
 
     if [[ ! -s "$wellknow_file" ]]; then
+        [[ -z "$new_macs" ]] && return
         merged_macs="$new_macs"
-        log "INFO: mac_hotspot_backup: seeding guest-wellknow.txt"
+        log "INFO: mac_hotspot_backup: seeding umacbak.txt"
     else
         current_macs=$(sort -u "$wellknow_file")
         merged_macs=$(printf '%s\n%s\n' "$current_macs" "$new_macs" | sort -u)
@@ -1043,7 +1094,7 @@ mac_hotspot_backup() {
 
 # ── Step 2: ACL snapshot (baseline for reload detection) ─────────────────────
 snapshot_acls() {
-    local grace_file="${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}"
+    local grace_file="${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}"
     _ACL_SNAPSHOT_HOTSPOT=$(md5sum "$MAC_LIST"          2>/dev/null | awk '{print $1}' || echo "absent")
     _ACL_SNAPSHOT_BLOCK=$(md5sum   "$BLOCK_DHCP"        2>/dev/null | awk '{print $1}' || echo "absent")
     _ACL_SNAPSHOT_QUEUE=$(md5sum   "$LEASE_REMOVE_QUEUE" 2>/dev/null | awk '{print $1}' || echo "absent")
@@ -1055,40 +1106,68 @@ snapshot_acls() {
 # log noise on the common no-change path). Callers use the return code to
 # decide whether the per-cycle summary line is worth logging.
 check_and_reload_if_changed() {
-    local grace_file="${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}"
-    local cur_hotspot cur_block cur_queue cur_grace rc
+    local grace_file="${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}"
+    local cur_hotspot cur_block cur_queue cur_grace rc now since_last acl_changed=0
     cur_hotspot=$(md5sum "$MAC_LIST"          2>/dev/null | awk '{print $1}' || echo "absent")
     cur_block=$(md5sum   "$BLOCK_DHCP"        2>/dev/null | awk '{print $1}' || echo "absent")
     cur_queue=$(md5sum   "$LEASE_REMOVE_QUEUE" 2>/dev/null | awk '{print $1}' || echo "absent")
     cur_grace=$(md5sum   "$grace_file"         2>/dev/null | awk '{print $1}' || echo "absent")
 
-    if [[ "$cur_hotspot" == "$_ACL_SNAPSHOT_HOTSPOT" && \
-          "$cur_block"   == "$_ACL_SNAPSHOT_BLOCK"   && \
-          "$cur_queue"   == "$_ACL_SNAPSHOT_QUEUE"   && \
-          "$cur_grace"   == "$_ACL_SNAPSHOT_GRACE" ]]; then
+    [[ "$cur_hotspot" != "$_ACL_SNAPSHOT_HOTSPOT" || "$cur_block" != "$_ACL_SNAPSHOT_BLOCK" || \
+       "$cur_queue"   != "$_ACL_SNAPSHOT_QUEUE"   || "$cur_grace" != "$_ACL_SNAPSHOT_GRACE" ]] \
+        && acl_changed=1
+
+    now=$(date +%s)
+    since_last=$(( now - _LAST_RELOAD_EPOCH ))
+
+    if (( acl_changed == 0 && since_last < RELOAD_SAFETY_INTERVAL_SECONDS )); then
         return 1
     fi
 
-    [[ "$cur_hotspot" != "$_ACL_SNAPSHOT_HOTSPOT" ]] && log "INFO: mac-hotspot.txt changed"
-    [[ "$cur_block"   != "$_ACL_SNAPSHOT_BLOCK"   ]] && log "INFO: blockdhcp.txt changed"
-    [[ "$cur_queue"   != "$_ACL_SNAPSHOT_QUEUE"   ]] && log "INFO: lease removal queue changed"
-    [[ "$cur_grace"   != "$_ACL_SNAPSHOT_GRACE"   ]] && log "INFO: gracedhcp.txt changed"
+    if (( acl_changed == 1 )); then
+        [[ "$cur_hotspot" != "$_ACL_SNAPSHOT_HOTSPOT" ]] && log "INFO: umacauth.txt changed"
+        [[ "$cur_block"   != "$_ACL_SNAPSHOT_BLOCK"   ]] && log "INFO: blockdhcp.txt changed"
+        [[ "$cur_queue"   != "$_ACL_SNAPSHOT_QUEUE"   ]] && log "INFO: lease removal queue changed"
+        [[ "$cur_grace"   != "$_ACL_SNAPSHOT_GRACE"   ]] && log "INFO: ugrace.txt changed"
+    else
+        log "INFO: ${RELOAD_SAFETY_INTERVAL_SECONDS}s since last reload — forcing safety-net reload"
+    fi
 
     _RELOAD_OK=0
     if [[ -n "${SERVER_RELOAD_SCRIPT:-}" && -x "$SERVER_RELOAD_SCRIPT" ]]; then
-        log "INFO: ACL changed — invoking $SERVER_RELOAD_SCRIPT"
+        log "INFO: invoking $SERVER_RELOAD_SCRIPT"
         export UHOTSPOT_RELOAD_ACTIVE=1
         if timeout 60 "$SERVER_RELOAD_SCRIPT" >/dev/null 2>>"$LOG_FILE"; then
             _RELOAD_OK=1
+            _LAST_RELOAD_EPOCH=$now
         else
             rc=$?
+            # Update the epoch on failure too, not just success: a persistent
+            # failure (broken uleases.sh/uiptables.sh, timeout) would otherwise
+            # keep since_last stuck below RELOAD_SAFETY_INTERVAL_SECONDS forever
+            # relative to the last real success (or never even set for a
+            # brand-new install), causing a retry — and its WARNING alert and
+            # trace file — every single cycle instead of backing off to the
+            # safety-net cadence. ACL-change-triggered reloads are unaffected:
+            # they fire on the next real diff, not on this timer.
+            _LAST_RELOAD_EPOCH=$now
             [[ $rc -eq 124 ]] \
                 && log "WARNING: $SERVER_RELOAD_SCRIPT timed out after 60s" \
                 || log "WARNING: $SERVER_RELOAD_SCRIPT exited with error (code $rc)"
         fi
         unset UHOTSPOT_RELOAD_ACTIVE
     else
-        log "WARNING: ACLs changed but SERVER_RELOAD_SCRIPT is not set or not executable"
+        # Same reasoning as the failure branch above: update the epoch here
+        # too, so a misconfigured SERVER_RELOAD_SCRIPT (missing or not
+        # executable) backs off to the safety-net cadence instead of
+        # re-logging this WARNING — and re-alerting via ualert.sh — on
+        # every single cycle.
+        _LAST_RELOAD_EPOCH=$now
+        if (( acl_changed == 1 )); then
+            log "WARNING: ACLs changed but SERVER_RELOAD_SCRIPT is not set or not executable"
+        else
+            log "WARNING: safety-net reload due but SERVER_RELOAD_SCRIPT is not set or not executable"
+        fi
     fi
     return 0
 }
@@ -1172,9 +1251,9 @@ run_cycle() {
         local authorized_total grace_total
         authorized_total=$(grep -c "^a;" "$MAC_LIST" 2>/dev/null || true)
         authorized_total=$(( ${authorized_total:-0} + 0 ))
-        grace_total=$(grep -c "^a;" "${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}" 2>/dev/null || true)
+        grace_total=$(grep -c "^a;" "${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}" 2>/dev/null || true)
         grace_total=$(( ${grace_total:-0} + 0 ))
-        log "INFO: vouchers=$VOUCHER_COUNT | authorized=$authorized_total | grace=$grace_total | new_auth=$SESSIONS_AUTHORIZED | revoked=$REVOKED | managed_authorized=$MANAGED_AUTHORIZED"
+        log "STATS: vouchers=$VOUCHER_COUNT | authorized=$authorized_total | grace=$grace_total | new_auth=$SESSIONS_AUTHORIZED | revoked=$REVOKED | managed_authorized=$MANAGED_AUTHORIZED"
 
         if [[ "$_RELOAD_OK" == "1" && ${#NEWLY_AUTHORIZED_MACS[@]} -gt 0 ]]; then
             kick_newly_authorized "$sta_data"
@@ -1195,6 +1274,7 @@ main() {
     load_config
     POLL_INTERVAL="${POLL_INTERVAL:-20}"
     STARTUP_GRACE_SECONDS="${STARTUP_GRACE_SECONDS:-120}"
+    RELOAD_SAFETY_INTERVAL_SECONDS="${RELOAD_SAFETY_INTERVAL_SECONDS:-3600}"
     verify_installation
     init_acl_files
 
@@ -1218,12 +1298,14 @@ main() {
     # iptables/ipset state does not survive a reboot, but the ACL files
     # themselves may be unchanged from before it — check_and_reload_if_changed()
     # (used inside run_cycle) would then never trigger a reload, leaving the
-    # firewall empty until the next ACL change or the @hourly cron. Force one
-    # reload here, on every daemon start, regardless of ACL state.
+    # firewall empty until the next ACL change or the safety-net interval.
+    # Force one reload here, on every daemon start, regardless of ACL state.
     if [[ -n "${SERVER_RELOAD_SCRIPT:-}" && -x "$SERVER_RELOAD_SCRIPT" ]]; then
         log "INFO: Startup — invoking $SERVER_RELOAD_SCRIPT to rebuild firewall"
         export UHOTSPOT_RELOAD_ACTIVE=1
-        if ! timeout 60 "$SERVER_RELOAD_SCRIPT" >/dev/null 2>>"$LOG_FILE"; then
+        if timeout 60 "$SERVER_RELOAD_SCRIPT" >/dev/null 2>>"$LOG_FILE"; then
+            _LAST_RELOAD_EPOCH=$(date +%s)
+        else
             log "WARNING: startup reload failed — firewall may be incomplete until next ACL change"
         fi
         unset UHOTSPOT_RELOAD_ACTIVE

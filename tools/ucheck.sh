@@ -26,8 +26,8 @@
 #   6. Exit
 #
 # DATA SOURCES CHECKED:
-#   mac-hotspot.txt    - Clients with an active voucher (hotspot authorized)
-#   gracedhcp.txt      - Clients in the grace period (no voucher yet)
+#   umacauth.txt    - Clients with an active voucher (hotspot authorized)
+#   ugrace.txt      - Clients in the grace period (no voucher yet)
 #   blockdhcp.txt      - Blocked MACs (grace expired without voucher)
 #   acl_mac/*.txt      - Permanent ACL lists (proxy, unlimited)
 #   pydhcpd.leases     - Active DHCP lease file
@@ -42,10 +42,10 @@
 #   State            | Expected presence
 #   -----------------+---------------------------------------------------
 #   Blocked          | blockdhcp only. NOT in acl_mac, grace or leases
-#   Grace period     | gracedhcp Y, leases Y (may be absent briefly
+#   Grace period     | ugrace Y, leases Y (may be absent briefly
 #                    | due to short 60s pool lease and limited range)
 #   ACL permanent    | acl_mac Y, NOT in blockdhcp
-#   Hotspot auth     | mac-hotspot Y, gracedhcp N (removed by clean_grace_list)
+#   Hotspot auth     | umacauth Y, ugrace N (removed by clean_grace_list)
 #
 # EXIT CODES:
 #   0 - Normal exit
@@ -79,7 +79,7 @@ _UHOTSPOT_CONF="/etc/uhotspot/uhotspot.conf"
 _grace=""
 if [ -f "$_UHOTSPOT_CONF" ]; then
     _grace=$(grep -E '^BLOCKDHCP_GRACE_SECONDS=' "$_UHOTSPOT_CONF" \
-        | cut -d'=' -f2- | tr -d '[:space:]' | head -1)
+        | head -1 | cut -d'=' -f2- | tr -d '[:space:]')
 fi
 [[ "$_grace" =~ ^[0-9]+$ ]] && BLOCKDHCP_GRACE_SECONDS="$_grace"
 unset _grace _UHOTSPOT_CONF
@@ -87,8 +87,8 @@ BLOCKDHCP_GRACE_SECONDS=${BLOCKDHCP_GRACE_SECONDS:-86400}
 
 # Paths (defaults match uhotspot.conf; used as fallback since this script
 # does not source that file)
-MAC_HOTSPOT="${ACL_MAC_HOTSPOT:-/etc/uhotspot/mac-hotspot.txt}"
-GRACE_DHCP="${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}"
+MAC_HOTSPOT="${ACL_MAC_HOTSPOT:-/etc/uhotspot/acl/umacauth.txt}"
+GRACE_DHCP="${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}"
 BLOCK_DHCP="${ACL_BLOCK_FILE:-/etc/acl/acl_dhcp/blockdhcp.txt}"
 ACL_MAC_DIR="${ACL_MAC_PATH:-/etc/acl/acl_mac}"
 LEASES_FILE="/etc/pydhcp/pydhcpd.leases"
@@ -147,10 +147,10 @@ check_mac() {
 
     local in_hotspot=0 in_grace=0 in_block=0 in_acl=0 in_leases=0
 
-    printf "  mac-hotspot.txt:   "
+    printf "  umacauth.txt:   "
     if found_in "$mac" "$MAC_HOTSPOT"; then in_hotspot=1; printf "$OK\n"; else printf "$NO\n"; fi
 
-    printf "  gracedhcp.txt:     "
+    printf "  ugrace.txt:     "
     if found_in "$mac" "$GRACE_DHCP"; then in_grace=1; printf "$OK\n"; else printf "$NO\n"; fi
 
     printf "  blockdhcp.txt:     "
@@ -185,17 +185,17 @@ check_mac() {
     # Consistency checks
     if [ $in_block -eq 1 ]; then
         [ $in_acl -eq 1 ]    && { warn "In blockdhcp AND acl_mac -- should be in one, not both"; warnings=$((warnings+1)); }
-        [ $in_grace -eq 1 ]  && { warn "In blockdhcp AND gracedhcp -- contradictory state"; warnings=$((warnings+1)); }
+        [ $in_grace -eq 1 ]  && { warn "In blockdhcp AND ugrace -- contradictory state"; warnings=$((warnings+1)); }
         [ $in_leases -eq 1 ] && { warn "In blockdhcp AND leases -- lease should have been cleared"; warnings=$((warnings+1)); }
     fi
 
     if [ $in_grace -eq 1 ] && [ $in_leases -eq 0 ]; then
-        info "In gracedhcp without active lease"
+        info "In ugrace without active lease"
         info "(normal: short pool lease / limited range)"
     fi
 
     if [ $in_hotspot -eq 1 ] && [ $in_grace -eq 1 ]; then
-        warn "In mac-hotspot AND gracedhcp -- clean_grace_list should have removed it from gracedhcp"
+        warn "In umacauth AND ugrace -- clean_grace_list should have removed it from ugrace"
         warnings=$((warnings+1))
     fi
 
@@ -321,7 +321,7 @@ menu_consistency() {
             fi
             if [ $in_grace -eq 1 ]; then
                 [ $w -eq 0 ] && printf "${WHITE}--- %s ---${NC}\n" "$mac"
-                warn "In blockdhcp AND gracedhcp -- contradictory state"
+                warn "In blockdhcp AND ugrace -- contradictory state"
                 w=$((w+1))
             fi
             if [ $in_leases -eq 1 ]; then
@@ -332,7 +332,7 @@ menu_consistency() {
         fi
         if [ $in_hotspot -eq 1 ] && [ $in_grace -eq 1 ]; then
             [ $w -eq 0 ] && printf "${WHITE}--- %s ---${NC}\n" "$mac"
-            warn "In mac-hotspot AND gracedhcp -- clean_grace_list should have removed it from gracedhcp"
+            warn "In umacauth AND ugrace -- clean_grace_list should have removed it from ugrace"
             w=$((w+1))
         fi
         [ $w -gt 0 ] && echo ""

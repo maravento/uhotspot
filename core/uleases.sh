@@ -10,8 +10,11 @@
 # Not compatible with isc-dhcp-server or any other DHCP daemon.
 #
 # DESCRIPTION:
-#   Runs from /etc/uhotspot/tools/ and operates on pydhcpd
-#   data located in /etc/pydhcp (which must exist).
+#   Runs from /etc/uhotspot/core/ and operates on pydhcpd
+#   data located in /etc/pydhcp (which must exist). Despite living next to
+#   ureload.sh/uhotspotd.sh under core/, this is not an auxiliary tool: it is
+#   the reconciliation step ureload.sh invokes on every reload, and its
+#   absence or failure aborts the whole reload chain (see ureload.sh).
 #
 #   This script:
 #   - Drains the lease removal queue written by uhotspotd
@@ -24,20 +27,22 @@
 #
 # FEATURES:
 #   - Locking mechanism to prevent concurrent executions (flock)
-#   - Concurrency guard: aborts if uhotspotd is running (standalone mode only)
+#   - Concurrency guard (standalone mode only): waits up to 10s for the
+#     daemon's cycle lock, then skips gracefully (exit 0) if still held
 #   - Lease filtering and selective persistence
 #   - Automatic cleanup and normalization of ACL files
-#   - Duplicate detection with fail-safe abort
+#   - ACL conflict detection with fail-safe abort (duplicate MAC/IP/hostname,
+#     and mac-*.txt IPs landing inside a reserved range)
 #   - Configuration read from /etc/uhotspot/uhotspot.conf (managed by usetup.sh)
 #   - All paths, ACL files and network settings read from uhotspot.conf
 #   - Optional WPAD/PAC support (see WPAD/PAC OPTION below)
 #   - UniFi Hotspot integration (default: true; set false in uhotspot.conf for test)
 #   - Grace period for unknown MACs before blocking (hotspot mode only)
-#   - Lease removal queue: drains /etc/uhotspot/leases-remove-queue.txt
+#   - Lease removal queue: drains /etc/uhotspot/acl/uqueue.txt
 #     (written by uhotspotd) during the safe stop→modify→start cycle
 #
 # LOCATION:
-#   Installed at /etc/uhotspot/tools/uleases.sh
+#   Installed at /etc/uhotspot/core/uleases.sh
 #   Requires /etc/pydhcp to exist (pydhcpd backend)
 #   Configuration stored in /etc/uhotspot/uhotspot.conf
 #
@@ -50,10 +55,10 @@
 #   Standard (mac-*.txt, blockdhcp.txt):
 #       a;MAC;IP;HOSTNAME;
 #
-#   Hotspot voucher (mac-hotspot.txt):
+#   Hotspot voucher (umacauth.txt):
 #       a;MAC;IP;HOSTNAME;END_TIME_EPOCH;
 #
-#   Grace (gracedhcp.txt, hotspot mode only):
+#   Grace (ugrace.txt, hotspot mode only):
 #       a;MAC;IP;HOSTNAME;FIRST_SEEN_EPOCH;
 #
 # NOTES:
@@ -64,12 +69,12 @@
 # UNIFI HOTSPOT MODULE:
 #   Integration layer that:
 #   - Classifies pydhcpd.leases entries: managed (mac-proxy.txt, mac-unlimited.txt),
-#     voucher-authorized (mac-hotspot), blocked (blockdhcp), grace-period
-#     (gracedhcp), or new
-#   - New and gracedhcp clients keep their pydhcpd pool lease (no fixed-address
-#     injection). Only mac-hotspot clients receive a fixed hotspot-range IP.
+#     voucher-authorized (umacauth), blocked (blockdhcp), grace-period
+#     (ugrace), or new
+#   - New and ugrace clients keep their pydhcpd pool lease (no fixed-address
+#     injection). Only umacauth clients receive a fixed hotspot-range IP.
 #   - Grace period (BLOCKDHCP_GRACE_SECONDS): any MAC detected in pydhcpd.leases
-#     that is not in an authoritative ACL is added to gracedhcp.txt with a
+#     that is not in an authoritative ACL is added to ugrace.txt with a
 #     timestamp. Regardless of reconnections, once the timer expires the MAC
 #     moves permanently to blockdhcp.txt. The only exit is manual removal or
 #     addition to mac-*.
@@ -86,8 +91,8 @@
 # 4. Set WPAD_ENABLED=true in /etc/uhotspot/uhotspot.conf
 #
 # NOTE on logging:
-# - Writes to /var/log/uhotspot.log (shared with ureload.sh). Rotation is
-#   self-installed below (/etc/logrotate.d/uhotspot).
+# - Writes to /var/log/uhotspot.log (shared with ureload.sh). Rotation
+#   (/etc/logrotate.d/uhotspot) is installed by usetup.sh only.
 #
 ################################################################################
 
@@ -123,24 +128,6 @@ if [ ! -f "$log_file" ]; then
     chown root:adm "$log_file" 2>/dev/null || chown root:root "$log_file"
 fi
 
-# Ensure logrotate config exists so the log does not grow unbounded.
-_logrotate_conf="/etc/logrotate.d/uhotspot"
-if [ ! -f "$_logrotate_conf" ]; then
-    cat > "$_logrotate_conf" <<'EOF'
-/var/log/uhotspot.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 640 root adm
-}
-EOF
-    chmod 644 "$_logrotate_conf"
-    chown root:root "$_logrotate_conf"
-fi
-unset _logrotate_conf
 
 # Start
 log "uleases start..."
@@ -151,7 +138,7 @@ log "uleases start..."
 # (and attempting to flock the same lock from a child of the lock holder
 # would deadlock).
 #
-# When triggered by the @hourly cron (UHOTSPOT_RELOAD_ACTIVE unset), acquire
+# When run manually, not via the daemon (UHOTSPOT_RELOAD_ACTIVE unset), acquire
 # CYCLE_LOCK before doing any real work, waiting briefly for the daemon to
 # finish its current cycle if one is in progress. The daemon only holds this
 # lock for the ~1-3s of active ACL mutation within run_cycle, not its entire
@@ -164,7 +151,7 @@ if [[ -z "${UHOTSPOT_RELOAD_ACTIVE:-}" ]]; then
     CYCLE_LOCK="/var/lock/uhotspotd-cycle.lock"
     exec 201>"$CYCLE_LOCK"
     if ! flock -w 10 201; then
-        log "INFO: uhotspotd cycle in progress — skipping cron-triggered reload (will retry next run)"
+        log "INFO: uhotspotd cycle in progress — skipping this manual run"
         log "uleases done (skipped)"
         exit 0
     fi
@@ -248,9 +235,9 @@ ACL_DHCP_PATH="${ACL_DHCP_PATH:-/etc/acl/acl_dhcp}"
 HOTSPOT_PATH="${HOTSPOT_PATH:-/etc/uhotspot}"
 ACL_MAC_PROXY="${ACL_MAC_PROXY:-/etc/acl/acl_mac/mac-proxy.txt}"
 ACL_MAC_UNLIMITED="${ACL_MAC_UNLIMITED:-/etc/acl/acl_mac/mac-unlimited.txt}"
-ACL_MAC_HOTSPOT="${ACL_MAC_HOTSPOT:-/etc/uhotspot/mac-hotspot.txt}"
+ACL_MAC_HOTSPOT="${ACL_MAC_HOTSPOT:-/etc/uhotspot/acl/umacauth.txt}"
 ACL_BLOCK_FILE="${ACL_BLOCK_FILE:-/etc/acl/acl_dhcp/blockdhcp.txt}"
-ACL_GRACE_FILE="${ACL_GRACE_FILE:-/etc/acl/acl_dhcp/gracedhcp.txt}"
+ACL_GRACE_FILE="${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}"
 BLOCKDHCP_GRACE_SECONDS="${BLOCKDHCP_GRACE_SECONDS:-86400}"
 UNIFI_HOTSPOT_ENABLED="${UNIFI_HOTSPOT_ENABLED:-true}"
 CLEANUP_INTERVAL="${CLEANUP_INTERVAL:-60}"
@@ -258,7 +245,7 @@ AUTHORIZED_LEASE_TIME="${AUTHORIZED_LEASE_TIME:-2592000}"
 WPAD_ENABLED="${WPAD_ENABLED:-false}"
 PING_CHECK_ENABLED="${PING_CHECK_ENABLED:-true}"
 
-LEASE_REMOVE_QUEUE="/etc/uhotspot/leases-remove-queue.txt"
+LEASE_REMOVE_QUEUE="/etc/uhotspot/acl/uqueue.txt"
 
 if [[ "${WPAD_ENABLED:-false}" == "true" ]]; then
     wpad_header="option wpad code 252 = text;"
@@ -390,7 +377,7 @@ function clean_hotspot_list() {
     while IFS= read -r pat; do
         local mac_actual="${pat//;/}"
         if grep -qiF "$pat" "$ACL_MAC_HOTSPOT" 2>/dev/null; then
-            log "clean_hotspot_list: removing $mac_actual from mac-hotspot (found in mac-unlimited)"
+            log "clean_hotspot_list: removing $mac_actual from umacauth (found in mac-unlimited)"
             (( removed++ )) || true
         fi
     done < "$patterns"
@@ -399,7 +386,7 @@ function clean_hotspot_list() {
         local _grep_rc=0
         grep -viFf "$patterns" "$ACL_MAC_HOTSPOT" > "$ACL_MAC_HOTSPOT".tmp || _grep_rc=$?
         if (( _grep_rc > 1 )); then
-            log "ERROR: clean_hotspot_list: grep failed (rc=$_grep_rc) — skipping update of mac-hotspot"
+            log "ERROR: clean_hotspot_list: grep failed (rc=$_grep_rc) — skipping update of umacauth"
             rm -f "$ACL_MAC_HOTSPOT".tmp
         else
             chmod 600 "$ACL_MAC_HOTSPOT".tmp
@@ -421,8 +408,8 @@ function clean_grace_list() {
     patterns=$(mktemp)
     TEMP_FILES_TO_CLEAN+=("${patterns}")
 
-    # Only remove from gracedhcp when MAC was promoted to an authoritative ACL
-    # (mac-* or mac-hotspot).
+    # Only remove from ugrace when MAC was promoted to an authoritative ACL
+    # (mac-* or umacauth).
     {
         grep -h '^a;' "$ACL_MAC_PATH"/mac-* 2>/dev/null || true
         grep -h '^a;' "$ACL_MAC_HOTSPOT" 2>/dev/null || true
@@ -435,7 +422,7 @@ function clean_grace_list() {
             local found_in=""
             grep -qhi "^a;${mac_actual};" "$ACL_MAC_PATH"/mac-* 2>/dev/null && found_in="acl_mac" || true
             grep -qi "^a;${mac_actual};" "$ACL_MAC_HOTSPOT" 2>/dev/null && found_in="${found_in:+$found_in/}hotspot" || true
-            log "clean_grace_list: removing $mac_actual from gracedhcp (found in ${found_in:-unknown}, date=$(date))"
+            log "clean_grace_list: removing $mac_actual from ugrace (found in ${found_in:-unknown}, date=$(date))"
             printf '^a;%s;\n' "$mac_actual" >> "$patterns"
             (( removed++ )) || true
         fi
@@ -446,7 +433,7 @@ function clean_grace_list() {
         local _grep_rc=0
         grep -vif "$patterns" "$ACL_GRACE_FILE" > "$ACL_GRACE_FILE.tmp" || _grep_rc=$?
         if (( _grep_rc > 1 )); then
-            log "ERROR: clean_grace_list: grep failed (rc=$_grep_rc) — skipping update of gracedhcp"
+            log "ERROR: clean_grace_list: grep failed (rc=$_grep_rc) — skipping update of ugrace"
             rm -f "$ACL_GRACE_FILE.tmp"
         else
             chmod 600 "$ACL_GRACE_FILE.tmp"
@@ -462,6 +449,17 @@ function expire_grace_entries() {
     file_temp=$(mktemp)
     TEMP_FILES_TO_CLEAN+=("${file_temp}")
     now_epoch=$(date +%s)
+    # Malformed lines (bad status/MAC/epoch) are discarded here, not kept —
+    # the opposite of clean_expired_macs() in uhotspotd.sh, which keeps
+    # malformed lines in umacauth.txt (a permanent-authorization list,
+    # where erring toward not revoking a real client is the safer default).
+    # ugrace.txt is temporary and self-healing instead: its writers
+    # (process_new_leases() in uhotspotd.sh and read_leases() here) always
+    # write a fresh, valid epoch, so a MAC dropped here just gets re-added
+    # correctly on its next DHCP lease renewal — keeping the malformed line
+    # would instead block that self-repair, since the MAC-match check in
+    # those writers would see it as "already tracked" and never re-add a
+    # valid entry for it.
     while IFS= read -r _line; do
         IFS=';' read -r status mac ip hostname epoch _ <<< "$_line"
         if [[ "$status" != "a" || -z "$mac" || -z "$epoch" || ! "$epoch" =~ ^[0-9]+$ ]]; then
@@ -534,7 +532,7 @@ function is_pydhcp() {
                         line_lease="a;$mac_address;$ip_address;$host;"
 
                         if [[ "${UNIFI_HOTSPOT_ENABLED:-true}" == "true" ]]; then
-                            # Authoritative: managed MAC (mac-*) or voucher-authenticated (mac-hotspot).
+                            # Authoritative: managed MAC (mac-*) or voucher-authenticated (umacauth).
                             mac_authoritative=""
                             grep -qi "^a;${mac_address};" "$ACL_MAC_PATH"/mac-* 2>/dev/null \
                                 && mac_authoritative="yes" || true
@@ -550,11 +548,11 @@ function is_pydhcp() {
                             elif grep -qi "^a;${mac_address};" "$ACL_GRACE_FILE" 2>/dev/null; then
                                 echo "$lease_content" >> "$temp_leases"
                             else
-                                local wellknow_file="${HOTSPOT_PATH}/guest-wellknow.txt"
+                                local wellknow_file="${HOTSPOT_PATH}/acl/umacbak.txt"
                                 if grep -qxiF "${mac_address}" "${wellknow_file}" 2>/dev/null; then
                                     echo "$lease_content" >> "$temp_leases"
                                 else
-                                    log "read_leases: $mac_address → new → gracedhcp (ip=$ip_address host=$host epoch=$(date +%s))"
+                                    log "read_leases: $mac_address → new → ugrace (ip=$ip_address host=$host epoch=$(date +%s))"
                                     echo "a;${mac_address};${ip_address};${host};$(date +%s);" >> "$ACL_GRACE_FILE"
                                     echo "$lease_content" >> "$temp_leases"
                                 fi
@@ -661,7 +659,7 @@ $ping_check_line
             fi
         done <<< "$all_sources"
 
-        # gracedhcp clients retain
+        # ugrace clients retain
         # their pydhcpd pool lease and need no fixed-address entry here.
 
         echo '
@@ -890,7 +888,7 @@ drain_lease_queue() {
     fi
 }
 
-function duplicate() {
+function check_acl_conflicts() {
     local has_error=0 sources=()
     shopt -s nullglob
     sources=("$ACL_MAC_PATH"/mac-*)
@@ -899,7 +897,7 @@ function duplicate() {
         sources+=("$ACL_MAC_HOTSPOT")
     fi
     if [[ ${#sources[@]} -eq 0 ]]; then
-        log "duplicate: no ACL source files found — skipping duplicate check"
+        log "check_acl_conflicts: no ACL source files found — skipping"
         is_pydhcp
         return
     fi
@@ -918,21 +916,47 @@ function duplicate() {
         fi
     done
 
+    # mac-*.txt IPs are administrator-assigned, with no dedicated range in
+    # uhotspot.conf (see README) — only HOTSPOT_RANGE_START/END (umacauth.txt)
+    # and SERV_INI_RANGE_BLOCK/SERV_END_RANGE_BLOCK (blockdhcp/ugrace pool) are
+    # defined there. A mac-*.txt IP landing inside either range is always a
+    # misconfiguration, regardless of whether a client currently holds it.
+    shopt -s nullglob
+    local mac_files=("$ACL_MAC_PATH"/mac-*)
+    shopt -u nullglob
+    if [[ ${#mac_files[@]} -gt 0 ]]; then
+        local block_prefix="${SERV_INI_RANGE_BLOCK%.*}" block_start="${SERV_INI_RANGE_BLOCK##*.}" block_end="${SERV_END_RANGE_BLOCK##*.}"
+        local mac ip prefix octet
+        while IFS=';' read -r status mac ip _; do
+            [[ "$status" != "a" || -z "$ip" ]] && continue
+            prefix="${ip%.*}"
+            octet="${ip##*.}"
+            [[ ! "$octet" =~ ^[0-9]+$ ]] && continue
+            if [[ "$prefix" == "$HOTSPOT_IP_RANGE" ]] && (( octet >= HOTSPOT_RANGE_START && octet <= HOTSPOT_RANGE_END )); then
+                log "ERROR: mac-*.txt IP conflict: $mac uses $ip, inside the hotspot range ${HOTSPOT_IP_RANGE}.${HOTSPOT_RANGE_START}-${HOTSPOT_RANGE_END} reserved for umacauth.txt — move it outside that range"
+                has_error=1
+            elif [[ "$prefix" == "$block_prefix" ]] && (( octet >= block_start && octet <= block_end )); then
+                log "ERROR: mac-*.txt IP conflict: $mac uses $ip, inside the blockdhcp pool range ${SERV_INI_RANGE_BLOCK}-${SERV_END_RANGE_BLOCK} reserved for ugrace/blockdhcp — move it outside that range"
+                has_error=1
+            fi
+        done < <(cat "${mac_files[@]}" 2>/dev/null)
+    fi
+
     if (( has_error == 0 )); then
         is_pydhcp
     else
-        log "Duplicate Data detected"
-        _notify "$local_user" "Warning: Abort" "Duplicate ACL data. Check $log_file" -i error
+        log "ACL configuration error detected — aborting"
+        _notify "$local_user" "Warning: Abort" "ACL configuration error. Check $log_file" -i error
         exit 1
     fi
 }
-duplicate
+check_acl_conflicts
 
 
 # Final summary
 _count() { local c=0; c=$(grep -c '^a;' "$1" 2>/dev/null) || c=0; echo "$c"; }
-log "Summary: blockdhcp=$(_count "$ACL_BLOCK_FILE") | proxy=$(_count "$ACL_MAC_PROXY") | unlimited=$(_count "$ACL_MAC_UNLIMITED")$(
-    [[ "${UNIFI_HOTSPOT_ENABLED:-true}" == "true" ]] && echo " | hotspot=$(_count "$ACL_MAC_HOTSPOT") | gracedhcp=$(_count "$ACL_GRACE_FILE")"
+log "ACL: blockdhcp=$(_count "$ACL_BLOCK_FILE") | proxy=$(_count "$ACL_MAC_PROXY") | unlimited=$(_count "$ACL_MAC_UNLIMITED")$(
+    [[ "${UNIFI_HOTSPOT_ENABLED:-true}" == "true" ]] && echo " | hotspot=$(_count "$ACL_MAC_HOTSPOT") | ugrace=$(_count "$ACL_GRACE_FILE")"
 )"
 
 # End
