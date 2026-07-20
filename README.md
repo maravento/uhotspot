@@ -19,6 +19,61 @@
   </tr>
 </table>
 
+## Requirements
+
+---
+
+**⚠️ WARNING:** Only tested on Ubuntu 24.04 LTS. Other versions or distros not tested, use at your own risk.
+
+### Hardware
+
+| Resource | Minimum |
+|----------|---------|
+| CPU | 2 cores @ 1 GHz |
+| RAM | 256 MB |
+| Disk | 100 MB |
+
+### Software
+
+| Component | Tested Version |
+|-----------|-----------------|
+| UniFi OS Server | 5.1.15 |
+| UniFi Network (self-hosted) | 10.4.57 |
+| `iptables` | 1.8.10 |
+| `ipset` | 7.19 |
+| `pydhcpd` | latest |
+
+### Mandatory
+
+| Component | Used by | Purpose | Propósito |
+|-----------|---------|---------|-----------|
+| **UniFi Network (self-hosted)** | `uhotspotd`, `uaudit.sh` | Captive portal SSID, vouchers, and the API Site must be **Third-Party Gateway**. Local admin account | SSID de portal cautivo, vouchers, y el Site de la API debe ser **Third-Party Gateway**. Cuenta de admin local |
+| **pydhcp** | `uhotspotd` (verified at startup) | DHCP backend. Exactly one must be active | Backend DHCP. Exactamente uno debe estar activo |
+| **iptables** + **ipset** | system administrator | Firewall enforcement of ACL files (must be configured manually) | Aplicación de firewall de los archivos ACL (debe configurarse manualmente) |
+| **bash**, **curl**, **jq**, **cron** | `uhotspotd`, `uaudit.sh`, `uleases.sh` | Script runtime, UniFi API, JSON parsing, scheduling | Runtime de scripts, API de UniFi, parseo de JSON, programación |
+
+### Optional
+
+| Component | When it's needed | Cuándo se necesita |
+|-----------|-------------------|---------------------|
+| **squid**, **apache2**, DHCP option 252 (WPAD) | Only if your network uses [proxymon](https://github.com/maravento/proxymon) (Squid-based filtering) — `apache2` hosts the WPAD/PAC file, and WPAD lets clients auto-discover the proxy. See that project for installation and configuration details. | Solo si su red usa [proxymon](https://github.com/maravento/proxymon) (filtrado basado en Squid) — `apache2` sirve el archivo WPAD/PAC, y WPAD permite que los clientes descubran el proxy automáticamente. Consulte ese proyecto para detalles de instalación y configuración. |
+
+```bash
+# Required packages
+sudo apt update
+sudo apt install -y bash curl jq iptables ipset cron python3
+
+# DHCP backend — install pydhcp:
+#   • pydhcp — https://github.com/maravento/pydhcp
+
+# Optional
+sudo apt install -y squid apache2
+```
+
+> Without UniFi reachable or without `pydhcpd` running (beyond their respective startup grace windows), `uhotspot` refuses to start. Without a working `uiptables.sh`, the daemon still starts and keeps classifying clients (grace/authorized/blocked) normally, but firewall enforcement is skipped with a log warning until it's configured. These are hard dependencies for full functionality.
+>
+> Sin UniFi alcanzable o sin `pydhcpd` corriendo (más allá de sus respectivas ventanas de gracia de arranque), `uhotspot` se niega a arrancar. Sin un `uiptables.sh` funcional, el daemon igual arranca y sigue clasificando clientes (gracia/autorizado/bloqueado) normalmente, pero se salta la aplicación del firewall con una advertencia en el log hasta que se configure. Son dependencias duras para la funcionalidad completa.
+
 ## SCOPE
 
 ---
@@ -176,65 +231,6 @@ SERVER_RELOAD_SCRIPT
     └── Firewall/ipset reload
         └── administrator-defined
 ```
-
-## MINIMUM REQUIREMENTS
-
----
-
-### Hardware
-
-| Resource | Minimum |
-|----------|---------|
-| CPU | 2 cores @ 1 GHz |
-| RAM | 256 MB |
-| Disk | 100 MB |
-| OS | Ubuntu 24.04 LTS — only OS/version tested by `usetup.sh`; any other Ubuntu version or other Linux distro is allowed to continue but at your own risk (see `check_distro()`) |
-
-### Software
-
-| Component | Tested Version |
-|-----------|-----------------|
-| OS | Ubuntu 24.04.4 LTS |
-| UniFi OS Server | 5.1.15 |
-| UniFi Network (self-hosted) | 10.4.57 |
-| `iptables` | 1.8.10 |
-| `ipset` | 7.19 |
-| `pydhcpd` | latest |
-
-## DEPENDENCIES
-
----
-
-### Required
-
-| Component | Used by | Purpose | Propósito |
-|-----------|---------|---------|-----------|
-| **UniFi Network (self-hosted)** | `uhotspotd`, `uaudit.sh` | Captive portal SSID, vouchers, and the API Site must be **Third-Party Gateway**. Local admin account | SSID de portal cautivo, vouchers, y el Site de la API debe ser **Third-Party Gateway**. Cuenta de admin local |
-| **pydhcp** | `uhotspotd` (verified at startup) | DHCP backend. Exactly one must be active | Backend DHCP. Exactamente uno debe estar activo |
-| **iptables** + **ipset** | system administrator | Firewall enforcement of ACL files (must be configured manually) | Aplicación de firewall de los archivos ACL (debe configurarse manualmente) |
-| **bash**, **curl**, **jq**, **cron** | `uhotspotd`, `uaudit.sh`, `uleases.sh` | Script runtime, UniFi API, JSON parsing, scheduling | Runtime de scripts, API de UniFi, parseo de JSON, programación |
-
-### Optional
-
-| Component | When it's needed | Cuándo se necesita |
-|-----------|-------------------|---------------------|
-| **squid**, **apache2**, DHCP option 252 (WPAD) | Only if your network uses [proxymon](https://github.com/maravento/proxymon) (Squid-based filtering) — `apache2` hosts the WPAD/PAC file, and WPAD lets clients auto-discover the proxy. See that project for installation and configuration details. | Solo si su red usa [proxymon](https://github.com/maravento/proxymon) (filtrado basado en Squid) — `apache2` sirve el archivo WPAD/PAC, y WPAD permite que los clientes descubran el proxy automáticamente. Consulte ese proyecto para detalles de instalación y configuración. |
-
-```bash
-# Required packages on Ubuntu 24.04
-sudo apt update
-sudo apt install -y bash curl jq iptables ipset cron python3
-
-# DHCP backend — install pydhcp:
-#   • pydhcp — https://github.com/maravento/pydhcp
-
-# Optional
-sudo apt install -y squid apache2
-```
-
-> Without UniFi reachable or without `pydhcpd` running (beyond their respective startup grace windows), `uhotspot` refuses to start. Without a working `uiptables.sh`, the daemon still starts and keeps classifying clients (grace/authorized/blocked) normally, but firewall enforcement is skipped with a log warning until it's configured. These are hard dependencies for full functionality.
->
-> Sin UniFi alcanzable o sin `pydhcpd` corriendo (más allá de sus respectivas ventanas de gracia de arranque), `uhotspot` se niega a arrancar. Sin un `uiptables.sh` funcional, el daemon igual arranca y sigue clasificando clientes (gracia/autorizado/bloqueado) normalmente, pero se salta la aplicación del firewall con una advertencia en el log hasta que se configure. Son dependencias duras para la funcionalidad completa.
 
 ## UNIFI PRE-CONFIGURATION
 
@@ -767,6 +763,46 @@ cd uhotspot && sudo bash usetup.sh
   </tr>
 </table>
 
+#### Startup sequence (server or controller reboot)
+
+<table>
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      Right after a host reboot, the login endpoint typically answers before the UniFi controller's data endpoints (<code>stat/voucher</code>, <code>stat/guest</code>, <code>stat/sta</code>) finish initializing. A login success does <b>not</b> by itself mean the backend is fully usable yet — the log shows both milestones separately:
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      Justo después de un reinicio del host, el endpoint de login típicamente responde antes de que los endpoints de datos del controlador UniFi (<code>stat/voucher</code>, <code>stat/guest</code>, <code>stat/sta</code>) terminen de inicializar. Que el login tenga éxito <b>no</b> significa por sí solo que el backend ya esté completamente operativo — el log muestra ambos hitos por separado:
+    </td>
+  </tr>
+</table>
+
+```text
+2026-07-12 21:41:10 INFO: UniFi login attempt failed (HTTP 000) — still within startup grace window
+2026-07-12 21:41:20 INFO: UniFi login attempt failed (HTTP 000) — still within startup grace window
+2026-07-12 21:41:30 INFO: UniFi login attempt failed (HTTP 000) — still within startup grace window
+2026-07-12 21:41:50 INFO: UniFi login OK (csrf=...)
+2026-07-12 21:41:51 WARNING: Could not load vouchers (rc=empty)
+2026-07-12 21:41:56 INFO: stat/guest unavailable — skipping sessions
+2026-07-12 21:41:56 INFO: stat/sta unavailable — skipping revoke
+2026-07-12 21:41:56 INFO: stat/sta unavailable — skipping authorize_managed_macs
+2026-07-12 21:42:11 WARNING: Could not load vouchers (rc=empty)
+2026-07-12 21:42:16 INFO: stat/guest unavailable — skipping sessions
+2026-07-12 21:42:16 INFO: stat/sta unavailable — skipping revoke
+2026-07-12 21:42:16 INFO: stat/sta unavailable — skipping authorize_managed_macs
+2026-07-12 21:42:31 INFO: UniFi backend ready (voucher/guest/sta OK)
+```
+
+<table>
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      Both parts are expected and self-resolving. The login retries are <code>uhotspotd.sh</code> waiting out <code>STARTUP_GRACE_SECONDS</code> while UniFi OS itself is still coming up. The couple of data-endpoint failures right after a successful login happen because UniFi OS brings its auth endpoint up slightly before the rest of its API is ready to serve — a few seconds of lag, not a real failure. <code>UniFi backend ready</code> logs exactly once, on the transition from any of <code>stat/voucher</code>/<code>stat/guest</code>/<code>stat/sta</code> failing to all three succeeding together — the single line to watch for "the daemon is now fully operational" instead of inferring it from the absence of further warnings.
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      Ambas partes son esperadas y se resuelven solas. Los reintentos de login son <code>uhotspotd.sh</code> esperando a que termine <code>STARTUP_GRACE_SECONDS</code> mientras UniFi OS todavía está iniciando. Los fallos en los endpoints de datos justo después de un login exitoso ocurren porque UniFi OS activa su endpoint de autenticación un poco antes de que el resto de su API esté lista para responder — unos segundos de retraso, no un fallo real. <code>UniFi backend ready</code> se registra exactamente una vez, en la transición de cualquiera de <code>stat/voucher</code>/<code>stat/guest</code>/<code>stat/sta</code> fallando a los tres respondiendo juntos — la línea a observar para saber "el daemon ya está completamente operativo" en vez de inferirlo por la ausencia de más advertencias.
+    </td>
+  </tr>
+</table>
+
 ### uhotspotd.service
 
 <table>
@@ -1284,32 +1320,12 @@ sudo /etc/uhotspot/tools/ualert.sh uninstall
     <td style="width: 50%; vertical-align: top;">
       The first <code>HTTP 502</code> (proxy up, backend not yet) followed immediately by <code>HTTP 000</code> on every subsequent request (connection itself unreachable) is the fingerprint of a UniFi OS controller restart, not a network/firewall problem on the <code>uhotspot</code> side — worth checking the controller's own system log for that window if it happens outside a planned update.
       <br><br>
-      A server reboot can show a different, unrelated-looking pattern: quiet <code>INFO</code>-level login retries (no alert, no escalation) while UniFi OS is still booting, followed by a login success, followed by a couple of <code>Could not load vouchers</code> failures right after — before settling into normal cycles:
+      A <b>server reboot</b> shows a different, unrelated-looking pattern instead — quiet <code>INFO</code>-level login retries while UniFi OS is still booting, followed by a login success, followed by a few data-endpoint failures before the backend settles — with no alert firing, since <code>ualert.sh</code> is also inside its own startup grace window at that point. See <a href="#uhotspotd">uhotspotd</a> above for that log sequence in full.
     </td>
     <td style="width: 50%; vertical-align: top;">
       El primer <code>HTTP 502</code> (proxy activo, backend aún no) seguido de inmediato por <code>HTTP 000</code> en cada petición posterior (la conexión misma es inalcanzable) es la firma de un reinicio del controlador UniFi OS, no un problema de red/firewall del lado de <code>uhotspot</code> — vale la pena revisar el log propio del sistema del controlador en esa ventana si ocurre fuera de una actualización planificada.
       <br><br>
-      Un reinicio del servidor puede mostrar un patrón distinto y aparentemente no relacionado: reintentos de login silenciosos en nivel <code>INFO</code> (sin alerta, sin escalamiento) mientras UniFi OS todavía está arrancando, seguidos de un login exitoso, seguidos de un par de fallos de <code>Could not load vouchers</code> justo después — antes de asentarse en ciclos normales:
-    </td>
-  </tr>
-</table>
-
-```text
-2026-07-12 21:41:20 INFO: UniFi login attempt failed (HTTP 000) — still within startup grace window
-2026-07-12 21:41:30 INFO: UniFi login attempt failed (HTTP 000) — still within startup grace window
-2026-07-12 21:41:50 INFO: UniFi login OK (csrf=...)
-2026-07-12 21:41:51 WARNING: Could not load vouchers (rc=empty)
-2026-07-12 21:42:11 WARNING: Could not load vouchers (rc=empty)
-[... next cycle succeeds silently, nothing logged ...]
-```
-
-<table>
-  <tr>
-    <td style="width: 50%; vertical-align: top;">
-      Both parts are expected and self-resolving. The login retries are <code>uhotspotd.sh</code> waiting out <code>STARTUP_GRACE_SECONDS</code> while UniFi OS itself is still coming up — no alert fires because <code>ualert.sh</code> is also inside its own startup grace window at this point. The couple of voucher failures right after a successful login happen because UniFi OS brings its auth endpoint up slightly before the rest of its API is ready to serve — a few seconds of lag, not a real failure — and it resolves on its own within one or two cycles, well short of the 3-cycle alert threshold.
-    </td>
-    <td style="width: 50%; vertical-align: top;">
-      Ambas partes son esperadas y se resuelven solas. Los reintentos de login son <code>uhotspotd.sh</code> esperando a que termine <code>STARTUP_GRACE_SECONDS</code> mientras UniFi OS todavía está iniciando — no se dispara ninguna alerta porque <code>ualert.sh</code> también está dentro de su propia ventana de gracia de arranque en ese momento. Los fallos de vouchers justo después de un login exitoso ocurren porque UniFi OS activa su endpoint de autenticación un poco antes de que el resto de su API esté lista para responder — unos segundos de retraso, no un fallo real — y se resuelve solo en uno o dos ciclos, muy por debajo del umbral de 3 ciclos que dispara una alerta.
+      Un <b>reinicio del servidor</b> muestra un patrón distinto y aparentemente no relacionado — reintentos de login silenciosos en nivel <code>INFO</code> mientras UniFi OS todavía está arrancando, seguidos de un login exitoso, seguidos de algunos fallos en los endpoints de datos antes de que el backend se asiente — sin que se dispare ninguna alerta, ya que <code>ualert.sh</code> también está dentro de su propia ventana de gracia de arranque en ese momento. Ver <a href="#uhotspotd">uhotspotd</a> arriba para esa secuencia de log completa.
     </td>
   </tr>
 </table>
@@ -1589,7 +1605,7 @@ sudo -u uosserver podman exec uosserver curl -v http://192.168.0.10:8880/guest/s
 </table>
 
 **Optional tunnel:**
-- [Cloudflare Tunnel (start|stop|status) - Zero Trust Activation Recommended](https://raw.githubusercontent.com/maravento/vault/master/scripts/bash/cftunnel.sh)
+- [Cloudflare Tunnel with Zero Trust Recommended](https://raw.githubusercontent.com/maravento/vault/master/scripts/bash/cftunnel.sh)
 
 ## NOTICE
 

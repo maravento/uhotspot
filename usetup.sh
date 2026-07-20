@@ -1,58 +1,99 @@
 #!/bin/bash
-# ─────────────────────────────────────────────────────────────────────────────
-#  usetup.sh — uhotspot installer / updater
-#  https://github.com/maravento/uhotspot
+# -----------------------------------------------------------------------------
+# usetup.sh -- uhotspot installer / updater
+# https://github.com/maravento/uhotspot
 #
-#  Modes:
-#    sudo bash usetup.sh             Install (default; aborts if already
-#                                     installed — use --update or --remove)
-#    sudo bash usetup.sh --update    Update scripts only (preserves config/ACLs)
-#    sudo bash usetup.sh --remove    Uninstall
-#    sudo bash usetup.sh --help      Usage
+# Modes:
+# sudo bash usetup.sh Install (default; aborts if already
+# installed -- use --update or --remove)
+# sudo bash usetup.sh --update Update scripts only (preserves config/ACLs)
+# sudo bash usetup.sh --remove Uninstall
+# sudo bash usetup.sh --help Usage
 #
-#  Run from inside the cloned repo. The script expects to find:
-#    ./core/uhotspotd.sh
-#    ./core/uhotspotd.service
-#    ./core/ureload.sh
-#    ./core/uleases.sh
-#    ./tools/uaudit.sh
-#    ./tools/ucheck.sh
-#    ./tools/uhotspotmon.sh
-#    ./tools/ualert.sh
-#    ./tools/uwatch.sh
-#    ./tools/uiptables_example.sh   (reference template only -- see below,
-#                                    not required, not deployed)
-#    ./acl/umacauth.txt
-#    ./acl/umacbak.txt
-#    ./acl/uqueue.txt
-#    ./acl/ugrace.txt
+# Run from inside the cloned repo. The script expects to find:
+# ./core/uhotspotd.sh
+# ./core/uhotspotd.service
+# ./core/ureload.sh
+# ./core/uleases.sh
+# ./tools/uaudit.sh
+# ./tools/ucheck.sh
+# ./tools/uhotspotmon.sh
+# ./tools/ualert.sh
+# ./tools/uwatch.sh
+# ./tools/uiptables_example.sh (reference template only -- see below,
+# not required, not deployed)
+# ./acl/umacauth.txt
+# ./acl/umacbak.txt
+# ./acl/uqueue.txt
+# ./acl/ugrace.txt
 #
-#  core/ holds the reload mechanism itself (uleases.sh reconciles ACLs/leases,
-#  ureload.sh invokes it, uhotspotd.sh/.service run the daemon that calls
-#  ureload.sh) — uhotspot cannot function without any of these. tools/ holds
-#  independent, optional utilities (auditing, monitoring, alerting) that
-#  uhotspot runs fine without. acl/ holds uhotspot's own data files (empty
-#  templates in the repo, deployed once and never overwritten afterward) —
-#  not to be confused with /etc/acl, which belongs to pydhcp/iptables.
+# core/ holds the reload mechanism itself (uleases.sh reconciles ACLs/leases,
+# ureload.sh invokes it, uhotspotd.sh/.service run the daemon that calls
+# ureload.sh) -- uhotspot cannot function without any of these. tools/ holds
+# independent, optional utilities (auditing, monitoring, alerting) that
+# uhotspot runs fine without. acl/ holds uhotspot's own data files (empty
+# templates in the repo, deployed once and never overwritten afterward) --
+# not to be confused with /etc/acl, which belongs to pydhcp/iptables.
 #
-#  tools/uiptables_example.sh is a reference template, not a functional
-#  script — the administrator copies it to /etc/uhotspot/tools/uiptables.sh
-#  and adapts it manually. deploy_scripts() below explicitly excludes it
-#  from the tools/*.sh deploy loop; it is never installed automatically.
+# tools/uiptables_example.sh is a reference template, not a functional
+# script -- the administrator copies it to /etc/uhotspot/tools/uiptables.sh
+# and adapts it manually. deploy_scripts() below explicitly excludes it
+# from the tools/*.sh deploy loop; it is never installed automatically.
 #
-#  Hard dependencies (checked before anything else; aborts if any is missing —
-#  none of these are auto-installed):
-#    bash, curl, jq, iptables, ipset, cron, python3
+# Hard dependencies (checked before anything else; aborts if any is missing --
+# none of these are auto-installed):
+# bash, curl, jq, iptables, ipset, cron, python3
 #
-#  Hard dependency NOT an apt package (aborts if missing):
-#    pydhcpd must be installed and running.
-#    pydhcp is not an apt package; install it from
-#    https://github.com/maravento/pydhcp before running this script.
-# ─────────────────────────────────────────────────────────────────────────────
+# Hard dependency NOT an apt package (aborts if missing):
+# pydhcpd must be installed and running.
+# pydhcp is not an apt package; install it from
+# https://github.com/maravento/pydhcp before running this script.
+# -----------------------------------------------------------------------------
 
 set -euo pipefail
 
-# ─── Paths ───────────────────────────────────────────────────────────────────
+# --- Usage -------------------------------------------------------------------
+usage() {
+    cat <<EOF
+Usage: sudo bash $(basename "$0") [OPTION]
+
+Modes:
+  (none) Install uhotspot (default). Aborts if already installed --
+                 use --update or --remove instead. Also aborts if the
+                 detected UniFi Network version (package "unifi", classic
+                 or embedded in unifi-os) is below the minimum tested
+                 (>= 10.4.57).
+  --update Update scripts only (preserves config, ACLs, firewall).
+  --remove Uninstall uhotspot (interactive, with confirmations).
+  --help, -h Show this help.
+
+Run from inside the cloned uhotspot repository. See the README for details.
+EOF
+}
+
+case "${1:-}" in
+    --help|-h|help)
+        usage
+        exit 0
+        ;;
+esac
+
+## root check
+if [[ "$(id -u)" != "0" ]]; then
+    echo "ERROR: This script must be run as root"
+    exit 1
+fi
+
+# prevent overlapping runs
+SCRIPT_LOCK="/var/lock/$(basename "$0" .sh).lock"
+(umask 077; : >> "$SCRIPT_LOCK")
+exec 200>"$SCRIPT_LOCK"
+if ! flock -n 200; then
+    echo "Script $(basename "$0") is already running"
+    exit 1
+fi
+
+# --- Paths -------------------------------------------------------------------
 HOTSPOT_DIR="/etc/uhotspot"
 CORE_DIR="${HOTSPOT_DIR}/core"
 TOOLS_DIR="${HOTSPOT_DIR}/tools"
@@ -63,7 +104,7 @@ LOGROTATE_FILE="/etc/logrotate.d/uhotspot"
 UIPTABLES_STUB="${TOOLS_DIR}/uiptables.sh"
 SERVICE_DEST="/etc/systemd/system/uhotspotd.service"
 
-# ─── Repo file expectations (relative to this script) ────────────────────────
+# --- Repo file expectations (relative to this script) ------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_CORE="${SCRIPT_DIR}/core"
 REPO_TOOLS="${SCRIPT_DIR}/tools"
@@ -71,27 +112,27 @@ REPO_ACL="${SCRIPT_DIR}/acl"
 REPO_UHOTSPOTD="${REPO_CORE}/uhotspotd.sh"
 REPO_SERVICE="${REPO_CORE}/uhotspotd.service"
 
-# ─── Required apt packages ────────────────────────────────────────────────────
+# --- Required apt packages ----------------------------------------------------
 APT_DEPS=(curl jq iptables ipset cron python3)
 
-# ─── Discovered runtime values (filled during install) ───────────────────────
-DHCP_BACKEND=""    # "pydhcpd"
+# --- Discovered runtime values (filled during install) -----------------------
+DHCP_BACKEND="" # "pydhcpd"
 LOCAL_USER=""
 
-# ─── Output helpers ──────────────────────────────────────────────────────────
-info()  { printf '  \e[32m✔\e[0m %s\n'   "$*"; }
-warn()  { printf '  \e[33m!\e[0m %s\n'   "$*"; }
-err()   { printf '  \e[31m✗\e[0m %s\n'   "$*" >&2; }
-step()  { printf '\n── %s ─────────────────────────────────────────────\n' "$*"; }
+# --- Output helpers ----------------------------------------------------------
+info() { printf ' \e[32m \e[0m %s\n' "$*"; }
+warn() { printf ' \e[33m!\e[0m %s\n' "$*"; }
+err() { printf ' \e[31m \e[0m %s\n' "$*" >&2; }
+step() { printf '\n-- %s ---------------------------------------------\n' "$*"; }
 abort() { err "$*"; exit 1; }
 
 version_ge() {
-    # version_ge A B — returns 0 if version A >= version B
+    # version_ge A B -- returns 0 if version A >= version B
     [[ "$1" == "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" ]]
 }
 
 dq_escape() {
-    # dq_escape STRING — escape \ " $ ` for safe reuse inside double quotes
+    # dq_escape STRING -- escape \ " $ ` for safe reuse inside double quotes
     local s="$1"
     s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
@@ -101,15 +142,15 @@ dq_escape() {
 }
 
 confirm() {
-    # confirm "prompt" [default y|n]  — returns 0 on yes, 1 on no
+    # confirm "prompt" [default y|n] -- returns 0 on yes, 1 on no
     local prompt="$1" default="${2:-n}" answer hint
     [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
-    read -rp "  ${prompt} ${hint}: " answer
+    read -rp " ${prompt} ${hint}: " answer
     answer="${answer:-$default}"
     [[ "${answer,,}" =~ ^y(es)?$ ]]
 }
 
-# ─── Preflight checks ────────────────────────────────────────────────────────
+# --- Preflight checks --------------------------------------------------------
 check_distro() {
     local id="" ver=""
     if [[ -r /etc/os-release ]]; then
@@ -127,14 +168,33 @@ check_distro() {
 }
 
 detect_local_user() {
-    # Multi-strategy detection: falls through session/login sources until
-    # one resolves to a valid local user.
+    local uid_min uid_max
+    local user uid best_uid=999999
+
+    uid_min=$(awk '/^UID_MIN/{print $2}' /etc/login.defs 2>/dev/null)
+    uid_max=$(awk '/^UID_MAX/{print $2}' /etc/login.defs 2>/dev/null)
+    uid_min=${uid_min:-1000}
+    uid_max=${uid_max:-60000}
+
     LOCAL_USER=""
-    LOCAL_USER=$(who | awk '/\(:0\)/{print $1; exit}')
-    [[ -z "$LOCAL_USER" ]] && LOCAL_USER=$(logname 2>/dev/null || true)
-    [[ -z "$LOCAL_USER" ]] && LOCAL_USER="${SUDO_USER:-}"
-    [[ -z "$LOCAL_USER" ]] && LOCAL_USER=$(who | awk 'NR==1{print $1}')
-    [[ -z "$LOCAL_USER" ]] && LOCAL_USER=$(ls -l /home 2>/dev/null | awk '/^d/{print $3; exit}')
+    while IFS=: read -r user _ uid _ _ _ shell; do
+        [ "$user" = "root" ] && continue
+        [ -z "$uid" ] && continue
+        [ "$uid" -lt "$uid_min" ] && continue
+        [ "$uid" -gt "$uid_max" ] && continue
+
+        case "$shell" in
+            */false|*/nologin) continue ;;
+        esac
+
+        id -nG "$user" 2>/dev/null | grep -qw sudo || continue
+
+        if [ "$uid" -lt "$best_uid" ]; then
+            best_uid="$uid"
+            LOCAL_USER="$user"
+        fi
+    done </etc/passwd
+
     if [[ -z "$LOCAL_USER" ]] || ! id "$LOCAL_USER" &>/dev/null; then
         abort "Cannot determine a valid local user"
     fi
@@ -142,12 +202,12 @@ detect_local_user() {
 }
 
 check_repo_files() {
-    [[ -r "$REPO_UHOTSPOTD"          ]] || abort "Missing $(basename "$REPO_UHOTSPOTD"). Run usetup.sh from inside the cloned uhotspot repository."
-    [[ -r "$REPO_SERVICE"            ]] || abort "Missing $(basename "$REPO_SERVICE"). Run usetup.sh from inside the cloned uhotspot repository."
-    [[ -r "${REPO_CORE}/ureload.sh"  ]] || abort "Missing core/ureload.sh. Run usetup.sh from inside the cloned uhotspot repository."
-    [[ -r "${REPO_CORE}/uleases.sh"  ]] || abort "Missing core/uleases.sh. Run usetup.sh from inside the cloned uhotspot repository."
-    [[ -d "$REPO_TOOLS"              ]] || abort "Missing tools/ directory. Run usetup.sh from inside the cloned uhotspot repository."
-    [[ -d "$REPO_ACL"                ]] || abort "Missing acl/ directory. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "$REPO_UHOTSPOTD" ]] || abort "Missing $(basename "$REPO_UHOTSPOTD"). Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "$REPO_SERVICE" ]] || abort "Missing $(basename "$REPO_SERVICE"). Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "${REPO_CORE}/ureload.sh" ]] || abort "Missing core/ureload.sh. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -r "${REPO_CORE}/uleases.sh" ]] || abort "Missing core/uleases.sh. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -d "$REPO_TOOLS" ]] || abort "Missing tools/ directory. Run usetup.sh from inside the cloned uhotspot repository."
+    [[ -d "$REPO_ACL" ]] || abort "Missing acl/ directory. Run usetup.sh from inside the cloned uhotspot repository."
     info "Repo files located"
 }
 
@@ -176,15 +236,15 @@ detect_dhcp_backend() {
     fi
 }
 
-# ─── Interactive prompts ──────────────────────────────────────────────────────
+# --- Interactive prompts ------------------------------------------------------
 ask() {
     local prompt="$1" default="$2" var="$3" answer
     if [[ -n "$default" ]]; then
-        read -rp "  ${prompt} [${default}]: " answer
+        read -rp " ${prompt} [${default}]: " answer
         answer="${answer:-$default}"
     else
         while true; do
-            read -rp "  ${prompt}: " answer
+            read -rp " ${prompt}: " answer
             [[ -n "$answer" ]] && break
             err "This field is required."
         done
@@ -195,7 +255,7 @@ ask() {
 ask_interface() {
     local prompt="$1" default="$2" var="$3" answer
     while true; do
-        read -rp "  ${prompt} [${default}]: " answer
+        read -rp " ${prompt} [${default}]: " answer
         answer="${answer:-$default}"
         if ip link show "$answer" &>/dev/null; then
             printf -v "$var" '%s' "$answer"
@@ -208,7 +268,7 @@ ask_interface() {
 ask_ip() {
     local prompt="$1" var="$2" answer
     while true; do
-        read -rp "  ${prompt}: " answer
+        read -rp " ${prompt}: " answer
         if [[ "$answer" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
             local valid=1
             IFS='.' read -ra octs <<< "$answer"
@@ -224,7 +284,7 @@ ask_ip() {
 ask_number() {
     local prompt="$1" default="$2" var="$3" answer
     while true; do
-        read -rp "  ${prompt} [${default}]: " answer
+        read -rp " ${prompt} [${default}]: " answer
         answer="${answer:-$default}"
         if [[ "$answer" =~ ^[0-9]+$ ]] && (( answer >= 1 )); then
             printf -v "$var" '%s' "$answer"
@@ -237,7 +297,7 @@ ask_number() {
 ask_octet() {
     local prompt="$1" default="$2" var="$3" ref_start="${4:-0}" answer
     while true; do
-        read -rp "  ${prompt} [${default}]: " answer
+        read -rp " ${prompt} [${default}]: " answer
         answer="${answer:-$default}"
         if [[ "$answer" =~ ^[0-9]+$ ]] && (( answer >= 1 && answer <= 254 )); then
             if [[ -n "$ref_start" ]] && (( answer <= ref_start )); then
@@ -257,7 +317,7 @@ ranges_overlap() {
     (( s1 <= e2 && s2 <= e1 ))
 }
 
-# ─── UniFi controller discovery ──────────────────────────────────────────────
+# --- UniFi controller discovery ----------------------------------------------
 DISCOVERED_URL=""
 DISCOVERED_TYPE=""
 
@@ -306,7 +366,7 @@ discover_unifi_controller() {
     return 1
 }
 
-# ─── Setup wizard ────────────────────────────────────────────────────────────
+# --- Setup wizard ------------------------------------------------------------
 run_setup_wizard() {
     local CFG_WAN_IF CFG_LAN_IF CFG_SERVER_IP CFG_IP_RANGE
     local CFG_RANGE_START CFG_RANGE_END CFG_ESSID
@@ -314,25 +374,25 @@ run_setup_wizard() {
     local found_url found_type
 
     echo ""
-    echo "══════════════════════════════════════════════════════"
-    echo "  uhotspot — Interactive Setup"
-    echo "══════════════════════════════════════════════════════"
+    echo "------------------------------------------------------"
+    echo "uhotspot -- Interactive Setup"
+    echo "------------------------------------------------------"
 
     step "Network"
     local ifaces
     ifaces=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | tr '\n' ' ' || true)
-    echo "  Available interfaces: $ifaces"
+    echo "Available interfaces: $ifaces"
     ask_interface "WAN interface" "eth0" CFG_WAN_IF
     ask_interface "LAN interface" "eth1" CFG_LAN_IF
-    ask_ip        "Server IP (this machine)" CFG_SERVER_IP
+    ask_ip "Server IP (this machine)" CFG_SERVER_IP
 
     step "Hotspot IP range"
     CFG_IP_RANGE=$(echo "$CFG_SERVER_IP" | cut -d'.' -f1-3)
-    echo "  Hotspot IP range base (auto-detected): $CFG_IP_RANGE"
+    echo "Hotspot IP range base (auto-detected): $CFG_IP_RANGE"
     local server_octet="${CFG_SERVER_IP##*.}"
     while true; do
         ask_octet "Range start (last octet)" "160" CFG_RANGE_START
-        ask_octet "Range end   (last octet)" "199" CFG_RANGE_END "$CFG_RANGE_START"
+        ask_octet "Range end (last octet)" "199" CFG_RANGE_END "$CFG_RANGE_START"
         if (( server_octet >= CFG_RANGE_START && server_octet <= CFG_RANGE_END )); then
             err "Range ${CFG_RANGE_START}-${CFG_RANGE_END} includes the server's own IP (.${server_octet}). Choose a different range."
             continue
@@ -346,7 +406,7 @@ run_setup_wizard() {
     step "UniFi credentials"
     ask "UniFi admin username" "admin" CFG_UNIFI_USER
     while true; do
-        read -rsp "  UniFi admin password: " CFG_UNIFI_PASS; echo ""
+        read -rsp " UniFi admin password: " CFG_UNIFI_PASS; echo ""
         [[ -n "$CFG_UNIFI_PASS" ]] && break
         err "Password cannot be empty."
     done
@@ -360,14 +420,14 @@ run_setup_wizard() {
     else
         warn "No UniFi controller detected automatically."
         ask "Enter controller URL manually (e.g. https://192.168.0.1:8443)" "" found_url
-        echo "  Enter controller type:"
+        echo "Enter controller type:"
         select found_type in "unifi-os" "classic"; do
             [[ -n "$found_type" ]] && break
         done
     fi
 
     step "Dependency check"
-    # Same "unifi" package (Network app / ace.jar) in both types — classic has
+    # Same "unifi" package (Network app / ace.jar) in both types -- classic has
     # it directly on the host, unifi-os has it inside the uosserver container.
     local MIN_VERSION_UNIFI="10.4.57"
     local detected_version min_version="$MIN_VERSION_UNIFI"
@@ -381,22 +441,22 @@ run_setup_wizard() {
             ;;
     esac
     if [[ -z "$detected_version" ]]; then
-        abort "Could not detect the installed UniFi version (type: ${found_type}). uhotspot only supports versions tested to date — install aborted. Files were already deployed to ${HOTSPOT_DIR}; run 'usetup.sh --remove' before retrying."
+        abort "Could not detect the installed UniFi version (type: ${found_type}). uhotspot only supports versions tested to date -- install aborted. Files were already deployed to ${HOTSPOT_DIR}; run 'usetup.sh --remove' before retrying."
     fi
     if ! version_ge "$detected_version" "$min_version"; then
-        abort "Detected UniFi version ${detected_version} (${found_type}) is below the minimum tested version ${min_version}. uhotspot only supports ${min_version} and above for this type — install aborted. Files were already deployed to ${HOTSPOT_DIR}; run 'usetup.sh --remove' before retrying."
+        abort "Detected UniFi version ${detected_version} (${found_type}) is below the minimum tested version ${min_version}. uhotspot only supports ${min_version} and above for this type -- install aborted. Files were already deployed to ${HOTSPOT_DIR}; run 'usetup.sh --remove' before retrying."
     fi
     info "UniFi version ${detected_version} (${found_type}) meets the minimum tested version (${min_version})"
 
     step "Reload script"
-    echo "  Script invoked after every ACL change (must exist and be executable)."
+    echo "Script invoked after every ACL change (must exist and be executable)."
     ask "Path to reload script" "${CORE_DIR}/ureload.sh" CFG_RELOAD_SCRIPT
 
     step "DHCP network"
     ask_mask() {
         local var="$1" default="${2:-255.255.255.0}" answer
         while true; do
-            read -rp "  Subnet mask [$default]: " answer
+            read -rp " Subnet mask [$default]: " answer
             answer="${answer:-$default}"
             if echo "$answer" | grep -qE '^(255|254|252|248|240|224|192|128|0)(\.(255|254|252|248|240|224|192|128|0)){3}$' \
                 && python3 -c "import ipaddress; ipaddress.IPv4Network('0.0.0.0/${answer}')" 2>/dev/null; then
@@ -408,7 +468,7 @@ run_setup_wizard() {
     ask_mask CFG_SERV_MASK "255.255.255.0"
     CFG_SERV_SUBNET=$(python3 -c "import ipaddress; net=ipaddress.IPv4Network('${CFG_SERVER_IP}/${CFG_SERV_MASK}', strict=False); print(net.network_address)")
     CFG_SERV_BROADCAST=$(python3 -c "import ipaddress; net=ipaddress.IPv4Network('${CFG_SERVER_IP}/${CFG_SERV_MASK}', strict=False); print(net.broadcast_address)")
-    info "Subnet: $CFG_SERV_SUBNET  Broadcast: $CFG_SERV_BROADCAST"
+    info "Subnet: $CFG_SERV_SUBNET Broadcast: $CFG_SERV_BROADCAST"
 
     step "DNS servers"
     ask "DNS servers (comma-separated)" "8.8.8.8,1.1.1.1" CFG_SERV_DNS
@@ -416,10 +476,10 @@ run_setup_wizard() {
     step "DHCP pool (for new/unknown clients)"
     local NET_BASE
     NET_BASE="${CFG_SERVER_IP%.*}"
-    echo "  These IPs are assigned temporarily to clients not yet in any ACL list."
+    echo "These IPs are assigned temporarily to clients not yet in any ACL list."
     while true; do
         ask_octet "Pool start (last octet)" "230" CFG_POOL_START
-        ask_octet "Pool end   (last octet)" "239" CFG_POOL_END "$CFG_POOL_START"
+        ask_octet "Pool end (last octet)" "239" CFG_POOL_END "$CFG_POOL_START"
         if ranges_overlap "$CFG_POOL_START" "$CFG_POOL_END" "$CFG_RANGE_START" "$CFG_RANGE_END"; then
             err "Pool ${CFG_POOL_START}-${CFG_POOL_END} overlaps the hotspot range (${CFG_RANGE_START}-${CFG_RANGE_END}). Choose a different pool."
             continue
@@ -445,13 +505,13 @@ run_setup_wizard() {
     confirm "Enable pydhcpd ping-check before OFFER? (disable if strict ICMP rules)" "y" && CFG_PING_CHECK="true" || CFG_PING_CHECK="false"
 
     step "Managed MAC lists (optional)"
-    echo "  mac-*.txt files allow specific devices to bypass the captive portal"
-    echo "  automatically (corporate laptops, APs, printers, switches, etc.)."
-    echo "  The daemon authorizes those MACs in UniFi each cycle if present."
-    echo "  Files are stored in /etc/acl/acl_mac/ and managed manually."
+    echo "mac-*.txt files allow specific devices to bypass the captive portal"
+    echo "automatically (corporate laptops, APs, printers, switches, etc.)."
+    echo "The daemon authorizes those MACs in UniFi each cycle if present."
+    echo "Files are stored in /etc/acl/acl_mac/ and managed manually."
     mkdir -p /etc/acl/acl_mac /etc/acl/acl_dhcp /etc/acl/acl_ipt
     chmod 700 /etc/acl/acl_mac /etc/acl/acl_dhcp /etc/acl/acl_ipt
-    info "Directory /etc/acl/acl_mac created — add your mac-*.txt files there"
+    info "Directory /etc/acl/acl_mac created -- add your mac-*.txt files there"
 
     step "Writing $CONFIG_FILE"
     (
@@ -462,24 +522,24 @@ run_setup_wizard() {
         PASS_Q=$(dq_escape "$CFG_UNIFI_PASS")
         URL_Q=$(dq_escape "$found_url")
         cat > "$CONFIG_FILE" <<EOF
-# uhotspot — auto-generated by usetup.sh on $(date '+%Y-%m-%d %H:%M:%S')
+# uhotspot -- auto-generated by usetup.sh on $(date '+%Y-%m-%d %H:%M:%S')
 # Edit this file to adjust any value.
 
-# ── Network ──────────────────────────────────────────────────────────────────
+# -- Network ------------------------------------------------------------------
 WAN_IF="${CFG_WAN_IF}"
 LAN_IF="${CFG_LAN_IF}"
 SERVER_IP="${CFG_SERVER_IP}"
 LOCAL_USER="${LOCAL_USER}"
 
-# ── Hotspot IP range ─────────────────────────────────────────────────────────
+# -- Hotspot IP range ---------------------------------------------------------
 HOTSPOT_IP_RANGE="${CFG_IP_RANGE}"
 HOTSPOT_RANGE_START=${CFG_RANGE_START}
 HOTSPOT_RANGE_END=${CFG_RANGE_END}
 
-# ── Guest SSID ───────────────────────────────────────────────────────────────
+# -- Guest SSID ---------------------------------------------------------------
 HOTSPOT_ESSID="${ESSID_Q}"
 
-# ── UniFi Controller ─────────────────────────────────────────────────────────
+# -- UniFi Controller ---------------------------------------------------------
 UNIFI_CONTROLLER_URL="${URL_Q}"
 UNIFI_USERNAME="${USER_Q}"
 UNIFI_PASSWORD="${PASS_Q}"
@@ -489,22 +549,22 @@ UNIFI_SITE="default"
 UNIFI_TYPE="${found_type}"
 
 
-# ── Reload script (required) ─────────────────────────────────────────────────
+# -- Reload script (required) -------------------------------------------------
 SERVER_RELOAD_SCRIPT="${CFG_RELOAD_SCRIPT}"
 
 
-# ── DHCP network (read by uleases.sh and uiptables.sh) ───────────────────────
+# -- DHCP network (read by uleases.sh and uiptables.sh) -----------------------
 SERV_DHCP="${CFG_SERVER_IP}"
 SERV_MASK="${CFG_SERV_MASK}"
 SERV_SUBNET="${CFG_SERV_SUBNET}"
 SERV_BROADCAST="${CFG_SERV_BROADCAST}"
 SERV_DNS="${CFG_SERV_DNS}"
 
-# ── DHCP pool (temporary IPs for new/unknown clients) ────────────────────────
+# -- DHCP pool (temporary IPs for new/unknown clients) ------------------------
 SERV_INI_RANGE_BLOCK="${CFG_SERV_INI_RANGE_BLOCK}"
 SERV_END_RANGE_BLOCK="${CFG_SERV_END_RANGE_BLOCK}"
 
-# ── Paths (read by uleases.sh) ───────────────────────────────────────────────
+# -- Paths (read by uleases.sh) -----------------------------------------------
 ACL_PATH=/etc/acl
 ACL_MAC_PATH=/etc/acl/acl_mac
 ACL_DHCP_PATH=/etc/acl/acl_dhcp
@@ -514,13 +574,13 @@ ACL_BLOCK_FILE=/etc/acl/acl_dhcp/blockdhcp.txt
 ACL_GRACE_FILE=/etc/uhotspot/acl/ugrace.txt
 ACL_MAC_HOTSPOT=/etc/uhotspot/acl/umacauth.txt
 
-# ── Daemon & DHCP timers ─────────────────────────────────────────────────────
+# -- Daemon & DHCP timers -----------------------------------------------------
 POLL_INTERVAL=${CFG_POLL_INTERVAL}
 CLEANUP_INTERVAL=${CFG_CLEANUP_INTERVAL}
 AUTHORIZED_LEASE_TIME=2592000
 BLOCKDHCP_GRACE_SECONDS=${CFG_GRACE_SECONDS}
 
-# ── Optional features ─────────────────────────────────────────────────────────
+# -- Optional features ---------------------------------------------------------
 UNIFI_HOTSPOT_ENABLED=true
 WPAD_ENABLED="${CFG_WPAD_ENABLED}"
 PING_CHECK_ENABLED="${CFG_PING_CHECK}"
@@ -531,7 +591,7 @@ EOF
     info "Config saved to $CONFIG_FILE (mode 600)"
 }
 
-# ─── Filesystem layout ───────────────────────────────────────────────────────
+# --- Filesystem layout -------------------------------------------------------
 deploy_directories() {
     mkdir -p "$HOTSPOT_DIR" "$CORE_DIR" "$TOOLS_DIR" "$ACL_DIR"
     chmod 700 "$HOTSPOT_DIR"
@@ -542,7 +602,7 @@ deploy_directories() {
 }
 
 deploy_acl_files() {
-    # Own data files (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt) —
+    # Own data files (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt) --
     # repo ships them as empty templates. Copy once and never overwrite an
     # existing one, on install or update, so real ACL/voucher/queue data
     # already on disk is never touched.
@@ -558,7 +618,7 @@ deploy_acl_files() {
         if [[ -f "$dest" ]]; then
             continue
         fi
-        [[ "$report_mode" == "warn" ]] && warn "$(basename "$dest") missing — creating empty"
+        [[ "$report_mode" == "warn" ]] && warn "$(basename "$dest") missing -- creating empty"
         install -m 600 -o root -g root "$f" "$dest"
     done
     info "ACL data files present in ${ACL_DIR}"
@@ -572,7 +632,7 @@ deploy_scripts() {
     for f in "${REPO_TOOLS}/"*.sh; do
         # uiptables_example.sh is a reference template for the administrator
         # to adapt manually into tools/uiptables.sh (see deploy_uiptables_stub)
-        # — never deployed as-is.
+        # -- never deployed as-is.
         [[ "$(basename "$f")" == "uiptables_example.sh" ]] && continue
         install -m 755 -o root -g root "$f" "${TOOLS_DIR}/"
     done
@@ -585,13 +645,13 @@ deploy_scripts() {
 
 deploy_uiptables_stub() {
     if [[ -f "$UIPTABLES_STUB" ]]; then
-        info "uiptables.sh already exists — leaving untouched"
+        info "uiptables.sh already exists -- leaving untouched"
         return 0
     fi
     cat > "$UIPTABLES_STUB" <<'STUB'
 #!/bin/bash
 # /etc/uhotspot/tools/uiptables.sh
-# UHOTSPOT_STUB_MARKER — do not remove this line while the script is
+# UHOTSPOT_STUB_MARKER -- do not remove this line while the script is
 # unconfigured; ureload.sh looks for it to skip the reload gracefully
 # instead of treating this stub's exit 1 as a real failure. It is removed
 # automatically once you replace this file's content with real rules.
@@ -602,9 +662,9 @@ deploy_uiptables_stub() {
 # this file and adapt the variables (wan, lan, wan_ip) to your network.
 #
 # The script must do two things:
-#   1. Flush and repopulate the ipsets `macgrace` and `machotspot` from the
-#      ACL files at /etc/uhotspot/acl/ugrace.txt and /etc/uhotspot/acl/umacauth.txt
-#   2. Apply (idempotently) the iptables rules that consume those ipsets.
+# 1. Flush and repopulate the ipsets `macgrace` and `machotspot` from the
+# ACL files at /etc/uhotspot/acl/ugrace.txt and /etc/uhotspot/acl/umacauth.txt
+# 2. Apply (idempotently) the iptables rules that consume those ipsets.
 #
 # Without this script populated, ACL changes will not reach the firewall and
 # the captive portal will not work.
@@ -614,7 +674,7 @@ exit 1
 STUB
     chown root:root "$UIPTABLES_STUB"
     chmod 750 "$UIPTABLES_STUB"
-    warn "Stub created at $UIPTABLES_STUB — YOU MUST EDIT IT (see README)"
+    warn "Stub created at $UIPTABLES_STUB -- YOU MUST EDIT IT (see README)"
 }
 
 install_logrotate() {
@@ -622,10 +682,21 @@ install_logrotate() {
     # (used by --update, where this should already exist); default is quiet
     # (used by a fresh install, where creating it is the expected case).
     local report_mode="${1:-quiet}"
+
+    # Ensure the shared log file exists with correct permissions from install
+    # time, instead of leaving it to whichever of uhotspotd.sh/ureload.sh/
+    # uleases.sh happens to create it first (tee -a defaults) or waiting for
+    # logrotate's first cycle (create 640 root adm only applies on rotation).
+    if [[ ! -f "$LOG_FILE" ]]; then
+        touch "$LOG_FILE"
+        chmod 640 "$LOG_FILE"
+        chown root:adm "$LOG_FILE" 2>/dev/null || chown root:root "$LOG_FILE"
+    fi
+
     if [[ -f "$LOGROTATE_FILE" ]]; then
         info "logrotate config already present at $LOGROTATE_FILE"
     else
-        [[ "$report_mode" == "warn" ]] && warn "$(basename "$LOGROTATE_FILE") missing — creating it"
+        [[ "$report_mode" == "warn" ]] && warn "$(basename "$LOGROTATE_FILE") missing -- creating it"
         cat > "$LOGROTATE_FILE" <<EOF
 ${LOG_FILE} {
     daily
@@ -644,7 +715,7 @@ EOF
 
 deregister_cron() {
     # uhotspotd triggers its own safety-net reload internally (see
-    # RELOAD_SAFETY_INTERVAL_SECONDS in uhotspotd.sh) — no external cron
+    # RELOAD_SAFETY_INTERVAL_SECONDS in uhotspotd.sh) -- no external cron
     # entry should exist. Removes a leftover @hourly ureload.sh entry if
     # found, matching both the current core/ureload.sh path and the
     # pre-restructure tools/ureload.sh path.
@@ -661,7 +732,7 @@ final_sanity_check() {
     local issues=0
 
     if [[ ! -x "$UIPTABLES_STUB" ]] || grep -qF "UHOTSPOT_STUB_MARKER" "$UIPTABLES_STUB" 2>/dev/null; then
-        warn "uiptables.sh is not configured — ACL changes will not reach the firewall"
+        warn "uiptables.sh is not configured -- ACL changes will not reach the firewall"
         (( issues++ )) || true
     fi
 
@@ -678,15 +749,15 @@ install_systemd_service() {
     systemctl enable uhotspotd
     systemctl restart uhotspotd \
         && info "uhotspotd enabled and started" \
-        || warn "Could not start uhotspotd — check: systemctl status uhotspotd"
+        || warn "Could not start uhotspotd -- check: systemctl status uhotspotd"
 }
 
-# ─── Install mode ────────────────────────────────────────────────────────────
+# --- Install mode ------------------------------------------------------------
 do_install() {
     echo ""
-    echo "══════════════════════════════════════════════════════"
-    echo "  uhotspot — installer"
-    echo "══════════════════════════════════════════════════════"
+    echo "------------------------------------------------------"
+    echo "uhotspot -- installer"
+    echo "------------------------------------------------------"
 
     if [[ -f "${CORE_DIR}/uhotspotd.sh" ]]; then
         abort "uhotspot is already installed at ${HOTSPOT_DIR}.
@@ -717,23 +788,23 @@ do_install() {
     final_sanity_check
 
     echo ""
-    echo "══════════════════════════════════════════════════════"
-    echo "  uhotspot installed."
+    echo "------------------------------------------------------"
+    echo "uhotspot installed."
     echo ""
-    echo "  Next steps:"
-    echo "    1. Edit ${UIPTABLES_STUB} with the firewall rules from the README."
-    echo "    2. Check service: systemctl status uhotspotd"
-    echo "    3. Check logs: tail -f ${LOG_FILE}"
-    echo "══════════════════════════════════════════════════════"
+    echo "Next steps:"
+    echo "1. Edit ${UIPTABLES_STUB} with the firewall rules from the README."
+    echo "2. Check service: systemctl status uhotspotd"
+    echo "3. Check logs: tail -f ${LOG_FILE}"
+    echo "------------------------------------------------------"
     echo ""
 }
 
-# ─── Update mode ─────────────────────────────────────────────────────────────
+# --- Update mode -------------------------------------------------------------
 do_update() {
     echo ""
-    echo "══════════════════════════════════════════════════════"
-    echo "  uhotspot — update"
-    echo "══════════════════════════════════════════════════════"
+    echo "------------------------------------------------------"
+    echo "uhotspot -- update"
+    echo "------------------------------------------------------"
 
     step "Preflight"
     check_distro
@@ -758,7 +829,7 @@ do_update() {
 
     step "Pause services"
     # Stop whatever is actively running its own script file before that file
-    # gets overwritten below — avoids replacing a script out from under a
+    # gets overwritten below -- avoids replacing a script out from under a
     # process that may still be mid-cycle. pydhcpd is deliberately left
     # alone: it is a separate project this update never modifies, and
     # stopping it would cut DHCP for the whole LAN, not just the hotspot.
@@ -773,10 +844,10 @@ do_update() {
     fi
 
     if (( _uhotspotd_was_active )); then
-        systemctl stop uhotspotd && info "uhotspotd stopped for update" || warn "Could not stop uhotspotd — continuing anyway"
+        systemctl stop uhotspotd && info "uhotspotd stopped for update" || warn "Could not stop uhotspotd -- continuing anyway"
     fi
     if (( _ualert_was_active )); then
-        systemctl stop ualert && info "ualert stopped for update" || warn "Could not stop ualert — continuing anyway"
+        systemctl stop ualert && info "ualert stopped for update" || warn "Could not stop ualert -- continuing anyway"
     fi
     if (( _uwatch_was_active )); then
         crontab -l 2>/dev/null | awk -v p="$uwatch_path" '(index($0,p)>0 && substr($0,1,1)!="#"){print "#" $0; next} {print}' | crontab -
@@ -789,7 +860,7 @@ do_update() {
     step "ACL data files"
     # ACL_DIR (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt), CONFIG_FILE
     # and UIPTABLES_STUB are the administrator's own live/customized data.
-    # --update never renames, moves or overwrites anything already present —
+    # --update never renames, moves or overwrites anything already present --
     # deploy_acl_files()/deploy_uiptables_stub() below only create what's
     # missing (e.g. a partial/broken install, warning about it since that
     # should not normally happen) and leave every existing file untouched.
@@ -806,16 +877,16 @@ do_update() {
     install -m 644 -o root -g root "$REPO_SERVICE" "$SERVICE_DEST"
     systemctl daemon-reload
     if (( _uhotspotd_was_active )); then
-        systemctl restart uhotspotd && info "uhotspotd restarted" || warn "Could not restart uhotspotd — check: systemctl status uhotspotd"
+        systemctl restart uhotspotd && info "uhotspotd restarted" || warn "Could not restart uhotspotd -- check: systemctl status uhotspotd"
     else
-        info "uhotspotd was not active before the update — leaving it stopped"
+        info "uhotspotd was not active before the update -- leaving it stopped"
     fi
 
     step "Resume services"
-    # Only restore what this update itself paused above — never start
+    # Only restore what this update itself paused above -- never start
     # something the administrator had deliberately left stopped/disabled.
     if (( _ualert_was_active )); then
-        systemctl start ualert && info "ualert restarted" || warn "Could not restart ualert — check: systemctl status ualert"
+        systemctl start ualert && info "ualert restarted" || warn "Could not restart ualert -- check: systemctl status ualert"
     fi
     if (( _uwatch_was_active )); then
         crontab -l 2>/dev/null | awk -v p="$uwatch_path" '(substr($0,1,1)=="#" && index($0,p)>0){print substr($0,2); next} {print}' | crontab -
@@ -826,41 +897,41 @@ do_update() {
     deregister_cron
 
     echo ""
-    echo "══════════════════════════════════════════════════════"
-    echo "  Update complete."
+    echo "------------------------------------------------------"
+    echo "Update complete."
     echo ""
-    echo "  Preserved (never renamed/moved/overwritten if already present):"
-    echo "    - ${CONFIG_FILE}"
-    echo "    - ${UIPTABLES_STUB}"
-    echo "    - ACL data files (*.txt)"
-    echo "    - Logrotate config"
+    echo "Preserved (never renamed/moved/overwritten if already present):"
+    echo "- ${CONFIG_FILE}"
+    echo "- ${UIPTABLES_STUB}"
+    echo "- ACL data files (*.txt)"
+    echo "- Logrotate config"
     echo ""
-    echo "  Paused for the update, then resumed to their prior state:"
-    echo "    - uhotspotd.service, ualert.service (if it was active)"
-    echo "    - uwatch cron entry (if it was active)"
+    echo "Paused for the update, then resumed to their prior state:"
+    echo "- uhotspotd.service, ualert.service (if it was active)"
+    echo "- uwatch cron entry (if it was active)"
     echo ""
-    echo "  Stale @hourly ureload.sh cron entry removed if present"
+    echo "Stale @hourly ureload.sh cron entry removed if present"
     echo ""
 
-    echo "  Backup: $backup_dir"
-    echo "══════════════════════════════════════════════════════"
+    echo "Backup: $backup_dir"
+    echo "------------------------------------------------------"
     echo ""
 }
 
-# ─── Remove mode ─────────────────────────────────────────────────────────────
+# --- Remove mode -------------------------------------------------------------
 do_remove() {
     echo ""
-    echo "══════════════════════════════════════════════════════"
-    echo "  uhotspot — uninstaller"
-    echo "══════════════════════════════════════════════════════"
+    echo "------------------------------------------------------"
+    echo "uhotspot -- uninstaller"
+    echo "------------------------------------------------------"
 
     echo ""
-    echo "  The following actions will be offered (each with confirmation):"
-    echo "    • Remove cron entries pointing to ${HOTSPOT_DIR}/core/ureload.sh"
-    echo "    • Stop and remove ualert.service and the uwatch cron entry (if installed)"
-    echo "    • Remove ${LOGROTATE_FILE}"
-    echo "    • Remove ${HOTSPOT_DIR} (includes uhotspot.conf, ACLs, uiptables.sh)"
-    echo "    • Remove ${LOG_FILE} and rotated logs"
+    echo "The following actions will be offered (each with confirmation):"
+    echo "* Remove cron entries pointing to ${HOTSPOT_DIR}/core/ureload.sh"
+    echo "* Stop and remove ualert.service and the uwatch cron entry (if installed)"
+    echo "* Remove ${LOGROTATE_FILE}"
+    echo "* Remove ${HOTSPOT_DIR} (includes uhotspot.conf, ACLs, uiptables.sh)"
+    echo "* Remove ${LOG_FILE} and rotated logs"
     echo ""
     confirm "Proceed with uninstall?" "n" || { info "Aborted by user."; exit 0; }
 
@@ -942,11 +1013,11 @@ do_remove() {
     # /etc/uhotspot
     step "$HOTSPOT_DIR"
     if [[ -d "$HOTSPOT_DIR" ]]; then
-        echo "  This will delete:"
-        echo "    - $CONFIG_FILE (credentials)"
-        echo "    - ${ACL_DIR}/ (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt)"
-        echo "    - $UIPTABLES_STUB (YOUR firewall script — back it up first if needed)"
-        echo "    - All other contents of $HOTSPOT_DIR"
+        echo "This will delete:"
+        echo "- $CONFIG_FILE (credentials)"
+        echo "- ${ACL_DIR}/ (umacauth.txt, umacbak.txt, uqueue.txt, ugrace.txt)"
+        echo "- $UIPTABLES_STUB (YOUR firewall script -- back it up first if needed)"
+        echo "- All other contents of $HOTSPOT_DIR"
         if confirm "Remove $HOTSPOT_DIR entirely?" "n"; then
             rm -rf -- "$HOTSPOT_DIR"
             info "Removed $HOTSPOT_DIR"
@@ -971,66 +1042,20 @@ do_remove() {
     fi
 
     echo ""
-    echo "══════════════════════════════════════════════════════"
-    echo "  Uninstall complete."
+    echo "------------------------------------------------------"
+    echo "Uninstall complete."
     echo ""
-    echo "  IMPORTANT: Firewall rules and ipsets (macgrace, machotspot)"
-    echo "  were NOT touched. Flush them manually if needed:"
-    echo "    sudo ipset destroy macgrace 2>/dev/null"
-    echo "    sudo ipset destroy machotspot 2>/dev/null"
-    echo "    # then flush related iptables rules"
-    echo "══════════════════════════════════════════════════════"
+    echo "IMPORTANT: Firewall rules and ipsets (macgrace, machotspot)"
+    echo "were NOT touched. Flush them manually if needed:"
+    echo "sudo ipset destroy macgrace 2>/dev/null"
+    echo "sudo ipset destroy machotspot 2>/dev/null"
+    echo "# then flush related iptables rules"
+    echo "------------------------------------------------------"
     echo ""
 }
 
-# ─── Usage ───────────────────────────────────────────────────────────────────
-usage() {
-    cat <<EOF
-Usage: sudo bash $(basename "$0") [OPTION]
-
-Modes:
-  (none)         Install uhotspot (default). Aborts if already installed —
-                 use --update or --remove instead. Also aborts if the
-                 detected UniFi Network version (package "unifi", classic
-                 or embedded in unifi-os) is below the minimum tested
-                 (>= 10.4.57).
-  --update       Update scripts only (preserves config, ACLs, firewall).
-  --remove       Uninstall uhotspot (interactive, with confirmations).
-  --help, -h     Show this help.
-
-Run from inside the cloned uhotspot repository. See the README for details.
-EOF
-}
-
-# ─── Preflight (runs unconditionally, before any mode is dispatched) ─────────
-preflight() {
-    # root check
-    if [[ "$(id -u)" != "0" ]]; then
-        echo "ERROR: This script must be run as root"
-        exit 1
-    fi
-
-    # prevent overlapping runs
-    local script_lock="/var/lock/$(basename "$0" .sh).lock"
-    exec 200>"$script_lock"
-    if ! flock -n 200; then
-        echo "Script $(basename "$0") is already running"
-        exit 1
-    fi
-
-}
-
-# ─── Dispatch ────────────────────────────────────────────────────────────────
+# --- Dispatch ----------------------------------------------------------------
 main() {
-    case "${1:-}" in
-        --help|-h|help)
-            usage
-            exit 0
-            ;;
-    esac
-
-    preflight
-
     case "${1:-}" in
         ""|install)
             detect_local_user

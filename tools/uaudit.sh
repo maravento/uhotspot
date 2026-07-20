@@ -6,47 +6,49 @@
 # uaudit - UniFi Network Hotspot - Full Client Audit & Management Tool
 #
 # REPORT SECTIONS
-#   1. Authorized  - umacauth.txt enriched with voucher code and status.
-#                    Voucher code is extracted from the hostname field
-#                    (format: guest{n}-{code}) and verified against stat/voucher.
-#                    STATUS values: MULTI (USED_MULTIPLE), VALID (VALID_ONE),
-#                    CONSUMED (quota exhausted, auto-purged by UniFi).
-#                    ON column: YES if client is currently connected to the AP.
-#   2. Vouchers    - full voucher list from stat/voucher with usage stats
+# 1. Authorized - umacauth.txt enriched with voucher code and status.
+# Voucher code is extracted from the hostname field
+# (format: guest{n}-{code}) and verified against stat/voucher.
+# STATUS values: MULTI (USED_MULTIPLE), VALID (VALID_ONE),
+# CONSUMED (quota exhausted, auto-purged by UniFi).
+# ON column: YES if client is currently connected to the AP.
+# 2. Vouchers - full voucher list from stat/voucher with usage stats
 #
 # INTERACTIVE ACTIONS (after report)
-#   [1] Delete unused vouchers   - delete vouchers never activated (used=0)
-#   [2] Forget clients no voucher - forget guests who connected to the portal
-#                                   but never submitted a voucher code
-#   [3] Delete expired vouchers  - delete vouchers past their end_time and
-#                                   forget all associated client history
-#   [4] Revoke by voucher code   - surgical invalidation of a single voucher:
-#                                   delete from stat/voucher if still present,
-#                                   unauthorize active sessions, forget all
-#                                   associated MACs from stat/guest and stat/sta
-#                                   Workaround for UniFi bug: stat/guest does not
-#                                   distinguish manually deleted vouchers from
-#                                   quota-exhausted ones (community.ui.com/31faff3e)
-#   [5] Purge everything         - DELETE all vouchers and client history
-#                                   (DESTRUCTIVE — requires typing YES)
+# [1] Delete unused vouchers - delete vouchers never activated (used=0)
+# [2] Forget clients no voucher - forget guests who connected to the portal
+# but never submitted a voucher code
+# [3] Delete expired vouchers - delete vouchers past their end_time and
+# forget all associated client history
+# [4] Revoke by voucher code - surgical invalidation of a single voucher:
+# delete from stat/voucher if still present,
+# unauthorize active sessions, forget all
+# associated MACs from stat/guest and stat/sta
+# Workaround for UniFi bug: stat/guest does not
+# distinguish manually deleted vouchers from
+# quota-exhausted ones (community.ui.com/31faff3e)
+# [5] Purge everything - DELETE all vouchers and client history
+# (DESTRUCTIVE -- requires typing YES)
 #
 # AUTH
-#   Authenticates against UniFi OS (/api/auth/login) by default, or classic
-#   controllers (/api/login) when UNIFI_TYPE=classic is set in uhotspot.conf.
-#   Requires HOTSPOT_ESSID, UNIFI_CONTROLLER_URL, UNIFI_USERNAME,
-#   UNIFI_PASSWORD in uhotspot.conf
+# Authenticates against UniFi OS (/api/auth/login) by default, or classic
+# controllers (/api/login) when UNIFI_TYPE=classic is set in uhotspot.conf.
+# Requires HOTSPOT_ESSID, UNIFI_CONTROLLER_URL, UNIFI_USERNAME,
+# UNIFI_PASSWORD in uhotspot.conf
 #
 # DEPENDENCIES : curl, jq
-# CONFIG       : /etc/uhotspot/uhotspot.conf
-# LOG          : /var/log/uaudit.log
-# TESTED ON    : Ubuntu 24.04 - UniFi OS Network 10.x
+# CONFIG : /etc/uhotspot/uhotspot.conf
+# LOG : /var/log/uaudit.log
+# TESTED ON : Ubuntu 24.04 - UniFi OS Network 10.x
 #
 # NOTE on logging:
 # - Manual/interactive script, not a daemon: /var/log/uaudit.log is truncated
-#   at the start of every run, so it always reflects only the latest audit.
-#   No rotation is needed or installed for this file.
+# at the start of every run, so it always reflects only the latest audit.
+# No rotation is needed or installed for this file.
 #
 ################################################################################
+
+set -uo pipefail
 
 # logging
 log_file="/var/log/uaudit.log"
@@ -71,8 +73,6 @@ if ! flock -n 200; then
     exit 1
 fi
 
-set -uo pipefail
-
 # Start
 log "uaudit start..."
 
@@ -93,7 +93,7 @@ _perms=$(stat -c '%a' "$CONFIG" 2>/dev/null)
 _gdigit="${_perms: -2:1}"
 _odigit="${_perms: -1}"
 if [[ "$_owner" != "root" ]] || [[ "$_gdigit" != "0" ]] || [[ "$_odigit" != "0" ]]; then
-    log "ERROR: $CONFIG has unsafe owner/permissions (owner=$_owner perms=$_perms) — must be owned by root with no group/other access (600). Refusing to source it."
+    log "ERROR: $CONFIG has unsafe owner/permissions (owner=$_owner perms=$_perms) -- must be owned by root with no group/other access (600). Refusing to source it."
     exit 1
 fi
 
@@ -101,7 +101,7 @@ load_config() {
     local file="$1" line key value
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*[#] ]] && continue
-        [[ "$line" =~ ^[[:space:]]*$    ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
         key="${line%%=*}"
         value="${line#*=}"
         value="${value%\"}"
@@ -128,7 +128,7 @@ SITE="${UNIFI_SITE:-default}"
 TYPE="${UNIFI_TYPE:-unifi-os}"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
-# ── Authentication ────────────────────────────────────────────────────────────
+# -- Authentication ------------------------------------------------------------
 do_login() {
     local login_path
     if [[ "$TYPE" == "classic" ]]; then
@@ -184,7 +184,7 @@ do_login() {
 
 do_login
 
-# ── API helpers ───────────────────────────────────────────────────────────────
+# -- API helpers ---------------------------------------------------------------
 if [[ "$TYPE" == "classic" ]]; then
     BASE="$UNIFI_CONTROLLER_URL/api/s/$SITE"
 else
@@ -202,7 +202,7 @@ api_get() {
     code=$(echo "$raw" | grep '__CODE__:' | cut -d: -f2 | tr -d '\r\n')
     body=$(echo "$raw" | grep -v '__CODE__:')
     if [[ "$code" == "401" ]]; then
-        echo "  INFO: Session expired — re-authenticating" >&2
+        echo "INFO: Session expired -- re-authenticating" >&2
         do_login
         raw=$(curl -sk -X GET \
             --connect-timeout 10 --max-time 30 \
@@ -227,7 +227,7 @@ api_post() {
         "$BASE/$1")
     code=$(echo "$raw" | grep '__CODE__:' | cut -d: -f2 | tr -d '\r\n')
     if [[ "$code" == "401" ]]; then
-        echo "  INFO: Session expired — re-authenticating" >&2
+        echo "INFO: Session expired -- re-authenticating" >&2
         do_login
         raw=$(curl -sk -X POST \
             --connect-timeout 10 --max-time 30 \
@@ -241,38 +241,38 @@ api_post() {
     echo "$raw" | grep -v '__CODE__:'
 }
 
-# ── Fetch data from UniFi API ─────────────────────────────────────────────────
+# -- Fetch data from UniFi API -------------------------------------------------
 STA=$(api_get "stat/sta")
 GUEST=$(api_get "stat/guest")
 VOUCHER=$(api_get "stat/voucher")
 
-STA_RC=$(echo "$STA"     | jq -r '.meta.rc // "error"' 2>/dev/null)
+STA_RC=$(echo "$STA" | jq -r '.meta.rc // "error"' 2>/dev/null)
 GUEST_RC=$(echo "$GUEST" | jq -r '.meta.rc // "error"' 2>/dev/null)
 VCH_RC=$(echo "$VOUCHER" | jq -r '.meta.rc // "error"' 2>/dev/null)
 
-log "stat/sta     -> $STA_RC    ($(echo "$STA"     | jq '.data|length' 2>/dev/null) entries)"
-log "stat/guest   -> $GUEST_RC  ($(echo "$GUEST"   | jq '.data|length' 2>/dev/null) entries)"
-log "stat/voucher -> $VCH_RC    ($(echo "$VOUCHER" | jq '.data|length' 2>/dev/null) entries)"
+log "stat/sta -> $STA_RC ($(echo "$STA" | jq '.data|length' 2>/dev/null) entries)"
+log "stat/guest -> $GUEST_RC ($(echo "$GUEST" | jq '.data|length' 2>/dev/null) entries)"
+log "stat/voucher -> $VCH_RC ($(echo "$VOUCHER" | jq '.data|length' 2>/dev/null) entries)"
 
-# ── Section 1: Authorized clients (umacauth.txt + stat/guest + stat/sta) ───
+# -- Section 1: Authorized clients (umacauth.txt + stat/guest + stat/sta) ---
 # VOUCHER RESOLUTION STRATEGY:
-#   1. Extract voucher code from hostname field in umacauth.txt
-#      (format: guest{n}-{voucher_code}, e.g. guest3-7708162928)
-#      This is always available even when the client is disconnected,
-#      because uhotspotd.sh writes it at authorization time.
-#   2. Verify the code exists in stat/voucher (API) and enrich with status.
-#      If found: show as CODE(STATUS)  e.g. 7708162928(USED_MULTIPLE)
-#      If not found in stat/voucher: quota exhausted and auto-purged by UniFi, show as CODE(CONSUMED)
-#   3. Fallback: if hostname has no voucher code, query stat/guest by MAC.
-#      This covers clients still connected whose session is in stat/guest.
-#   4. If neither source yields a code: show N/A.
+# 1. Extract voucher code from hostname field in umacauth.txt
+# (format: guest{n}-{voucher_code}, e.g. guest3-7708162928)
+# This is always available even when the client is disconnected,
+# because uhotspotd.sh writes it at authorization time.
+# 2. Verify the code exists in stat/voucher (API) and enrich with status.
+# If found: show as CODE(STATUS) e.g. 7708162928(USED_MULTIPLE)
+# If not found in stat/voucher: quota exhausted and auto-purged by UniFi, show as CODE(CONSUMED)
+# 3. Fallback: if hostname has no voucher code, query stat/guest by MAC.
+# This covers clients still connected whose session is in stat/guest.
+# 4. If neither source yields a code: show N/A.
 print_authorized() {
     local ACL_HOTSPOT="/etc/uhotspot/acl/umacauth.txt"
     [ ! -f "$ACL_HOTSPOT" ] && return
 
     echo ""
     echo "============================================================================"
-    echo " AUTHORIZED — umacauth.txt"
+    echo "AUTHORIZED -- umacauth.txt"
     echo "============================================================================"
 
     local sta_map
@@ -333,11 +333,11 @@ print_authorized() {
     echo ""
 }
 
-# ── Section 2: Vouchers (stat/voucher) ───────────────────────────────────────
+# -- Section 2: Vouchers (stat/voucher) ---------------------------------------
 print_voucher() {
     echo ""
     echo "============================================================================"
-    echo " VOUCHERS — stat/voucher"
+    echo "VOUCHERS -- stat/voucher"
     echo "============================================================================"
     {
         printf "CODE|STATUS|DURATION|QUOTA|USED|EXPIRES\n"
@@ -350,11 +350,11 @@ print_voucher() {
     echo ""
 }
 
-# ── Interactive [1]: delete unused vouchers (used == 0) ──────────────────────
+# -- Interactive [1]: delete unused vouchers (used == 0) ----------------------
 interactive_delete_unused() {
     echo ""
     echo "============================================================================"
-    echo " DELETE UNUSED VOUCHERS - vouchers that have never been activated"
+    echo "DELETE UNUSED VOUCHERS - vouchers that have never been activated"
     echo "============================================================================"
 
     mapfile -t UNUSED_IDS < <(echo "$VOUCHER" | jq -r '
@@ -366,7 +366,7 @@ interactive_delete_unused() {
         return
     fi
 
-    echo "  Unused vouchers to delete:"
+    echo "Unused vouchers to delete:"
     echo ""
     for vid in "${UNUSED_IDS[@]}"; do
         local info
@@ -378,13 +378,13 @@ interactive_delete_unused() {
                 ("quota=" + ((.quota // 0) | tostring)),
                 (if .create_time then (.create_time | strftime("%Y-%m-%d")) else "N/A" end)
               ]
-            | join("  ")
+            | join(" ")
         ' 2>/dev/null)
-        echo "    code=$info"
+        echo "code=$info"
     done
 
     echo ""
-    read -rp "  Confirm deletion of ${#UNUSED_IDS[@]} unused voucher(s)? [y/N]: " CONFIRM
+    read -rp " Confirm deletion of ${#UNUSED_IDS[@]} unused voucher(s)? [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[yY]$ ]] && log "Cancelled." && return
 
     echo ""
@@ -402,19 +402,19 @@ interactive_delete_unused() {
     log "Done."
 }
 
-# ── Interactive [2]: forget portal clients who never submitted a voucher ───────
+# -- Interactive [2]: forget portal clients who never submitted a voucher -------
 interactive_forget_no_voucher() {
     echo ""
     echo "============================================================================"
-    echo " FORGET CLIENTS WITHOUT VOUCHER - connected to portal but never used one"
+    echo "FORGET CLIENTS WITHOUT VOUCHER - connected to portal but never used one"
     echo "============================================================================"
 
     if [[ "$GUEST_RC" != "ok" ]]; then
-        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) — aborting to prevent unintended mass-forget."
+        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) -- aborting to prevent unintended mass-forget."
         return
     fi
     if [[ "$STA_RC" != "ok" ]]; then
-        log "ERROR: stat/sta data unavailable (rc=$STA_RC) — aborting to prevent unintended mass-forget."
+        log "ERROR: stat/sta data unavailable (rc=$STA_RC) -- aborting to prevent unintended mass-forget."
         return
     fi
 
@@ -447,7 +447,7 @@ interactive_forget_no_voucher() {
         | (.mac | ascii_downcase)
     ' 2>/dev/null | sort -u | while IFS= read -r mac; do
         echo "$guest_macs" | grep -qx "$mac" && continue
-        echo "$sta_macs"   | grep -qx "$mac" && continue
+        echo "$sta_macs" | grep -qx "$mac" && continue
         echo "$mac"
     done)
 
@@ -456,7 +456,7 @@ interactive_forget_no_voucher() {
         return
     fi
 
-    echo "  Clients to forget (${#NOVOUCHER_MACS[@]}):"
+    echo "Clients to forget (${#NOVOUCHER_MACS[@]}):"
     echo ""
     for mac in "${NOVOUCHER_MACS[@]}"; do
         local hostname last_seen
@@ -467,11 +467,11 @@ interactive_forget_no_voucher() {
             .data[] | select((.mac | ascii_downcase) == $m)
             | if .last_seen then (.last_seen | strftime("%Y-%m-%d %H:%M")) else "N/A" end
         ' 2>/dev/null | head -1)
-        printf "    %-20s  %-25s  last_seen=%s\n" "$mac" "$hostname" "$last_seen"
+        printf " %-20s %-25s last_seen=%s\n" "$mac" "$hostname" "$last_seen"
     done
 
     echo ""
-    read -rp "  Confirm forget of ${#NOVOUCHER_MACS[@]} client(s)? [y/N]: " CONFIRM
+    read -rp " Confirm forget of ${#NOVOUCHER_MACS[@]} client(s)? [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[yY]$ ]] && log "Cancelled." && return
 
     echo ""
@@ -488,26 +488,26 @@ interactive_forget_no_voucher() {
     log "Done."
 }
 
-# ── Interactive [3]: delete expired vouchers + forget their clients ────────────
+# -- Interactive [3]: delete expired vouchers + forget their clients ------------
 interactive_delete_expired() {
     local now
     now=$(date +%s)
 
     echo ""
     echo "============================================================================"
-    echo " DELETE EXPIRED VOUCHERS + FORGET THEIR CLIENTS"
+    echo "DELETE EXPIRED VOUCHERS + FORGET THEIR CLIENTS"
     echo "============================================================================"
 
     if [[ "$VCH_RC" != "ok" ]]; then
-        log "ERROR: stat/voucher data unavailable (rc=$VCH_RC) — aborting."
+        log "ERROR: stat/voucher data unavailable (rc=$VCH_RC) -- aborting."
         return
     fi
     if [[ "$STA_RC" != "ok" ]]; then
-        log "ERROR: stat/sta data unavailable (rc=$STA_RC) — aborting to prevent unintended client disconnect."
+        log "ERROR: stat/sta data unavailable (rc=$STA_RC) -- aborting to prevent unintended client disconnect."
         return
     fi
     if [[ "$GUEST_RC" != "ok" ]]; then
-        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) — aborting to prevent unintended client forget."
+        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) -- aborting to prevent unintended client forget."
         return
     fi
 
@@ -523,7 +523,7 @@ interactive_delete_expired() {
         return
     fi
 
-    echo "  Expired vouchers to delete:"
+    echo "Expired vouchers to delete:"
     echo ""
     for vid in "${EXPIRED_IDS[@]}"; do
         local info
@@ -535,13 +535,13 @@ interactive_delete_expired() {
                 ("used=" + ((.used // 0) | tostring)),
                 (if .end_time then (.end_time | strftime("%Y-%m-%d %H:%M")) else "N/A" end)
               ]
-            | join("  ")
+            | join(" ")
         ' 2>/dev/null)
-        echo "    code=$info"
+        echo "code=$info"
     done
 
     echo ""
-    read -rp "  Confirm deletion of ${#EXPIRED_IDS[@]} expired voucher(s)? [y/N]: " CONFIRM
+    read -rp " Confirm deletion of ${#EXPIRED_IDS[@]} expired voucher(s)? [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[yY]$ ]] && log "Cancelled." && return
 
     echo ""
@@ -556,7 +556,7 @@ interactive_delete_expired() {
         if [ "$rc" = "ok" ]; then
             log "Deleted voucher: $code"
         else
-            log "Failed to delete voucher: $code — skipping its clients"
+            log "Failed to delete voucher: $code -- skipping its clients"
             continue
         fi
 
@@ -594,53 +594,53 @@ interactive_delete_expired() {
     log "Done."
 }
 
-# ── Interactive [5]: purge all vouchers and client history ────────────────────
+# -- Interactive [5]: purge all vouchers and client history --------------------
 interactive_purge_all() {
     if [[ "$VCH_RC" != "ok" ]]; then
-        log "ERROR: stat/voucher data unavailable (rc=$VCH_RC) — aborting purge."
+        log "ERROR: stat/voucher data unavailable (rc=$VCH_RC) -- aborting purge."
         return
     fi
     if [[ "$STA_RC" != "ok" ]]; then
-        log "ERROR: stat/sta data unavailable (rc=$STA_RC) — aborting purge."
+        log "ERROR: stat/sta data unavailable (rc=$STA_RC) -- aborting purge."
         return
     fi
     if [[ "$GUEST_RC" != "ok" ]]; then
-        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) — aborting purge."
+        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) -- aborting purge."
         return
     fi
 
     local voucher_total sta_total guest_total
     voucher_total=$(echo "$VOUCHER" | jq -r '.data | length' 2>/dev/null || echo "?")
-    sta_total=$(echo "$STA"     | jq -r '.data | length' 2>/dev/null || echo "?")
+    sta_total=$(echo "$STA" | jq -r '.data | length' 2>/dev/null || echo "?")
     guest_total=$(echo "$GUEST" | jq -r '.data | length' 2>/dev/null || echo "?")
 
     echo ""
     echo "============================================================================"
-    echo " PURGE ALL — THIS WILL DESTROY ALL VOUCHERS AND CLIENT HISTORY"
+    echo "PURGE ALL -- THIS WILL DESTROY ALL VOUCHERS AND CLIENT HISTORY"
     echo "============================================================================"
     echo ""
-    echo "  Impact summary:"
-    echo "    - Vouchers to delete    : $voucher_total  (stat/voucher)"
-    echo "    - Active sessions to cut: $sta_total  (stat/sta)"
-    echo "    - Client records to erase: $guest_total  (stat/guest)"
+    echo "Impact summary:"
+    echo "- Vouchers to delete : $voucher_total (stat/voucher)"
+    echo "- Active sessions to cut: $sta_total (stat/sta)"
+    echo "- Client records to erase: $guest_total (stat/guest)"
     echo ""
-    echo "  This action will:"
-    echo "    - DELETE all vouchers — all codes become immediately invalid"
-    echo "    - DISCONNECT all currently connected guests"
-    echo "    - ERASE all guest history — clients will be unknown to UniFi"
+    echo "This action will:"
+    echo "- DELETE all vouchers -- all codes become immediately invalid"
+    echo "- DISCONNECT all currently connected guests"
+    echo "- ERASE all guest history -- clients will be unknown to UniFi"
     echo ""
     echo "============================================================================"
-    echo "  !!            THIS ACTION CANNOT BE UNDONE                        !!"
+    echo "!! THIS ACTION CANNOT BE UNDONE !!"
     echo "============================================================================"
     echo ""
-    read -rp "  Are you sure you want to proceed? [y/N]: " PRECONFIRM
+    read -rp " Are you sure you want to proceed? [y/N]: " PRECONFIRM
     [[ ! "$PRECONFIRM" =~ ^[yY]$ ]] && log "Cancelled." && return
 
     echo ""
-    echo "  Final confirmation required."
-    echo "  Type the word YES (uppercase) to execute the purge:"
+    echo "Final confirmation required."
+    echo "Type the word YES (uppercase) to execute the purge:"
     echo ""
-    read -rp "  > " CONFIRM
+    read -rp " > " CONFIRM
     [[ "$CONFIRM" != "YES" ]] && log "Cancelled." && return
 
     echo ""
@@ -682,7 +682,7 @@ interactive_purge_all() {
     log "Purge complete."
 }
 
-# ── Run report ────────────────────────────────────────────────────────────────
+# -- Run report ----------------------------------------------------------------
 OUTPUT=""
 OUTPUT+=$(print_authorized)
 OUTPUT+=$(print_voucher)
@@ -697,30 +697,30 @@ echo "$OUTPUT"
 
 printf "\nAudit complete. Log saved to: %s\n" "$log_file"
 
-# ── Interactive [4]: revoke voucher by code (workaround for UniFi bug) ────────
+# -- Interactive [4]: revoke voucher by code (workaround for UniFi bug) --------
 interactive_revoke_by_code() {
     echo ""
     echo "============================================================================"
-    echo " REVOKE BY VOUCHER CODE — surgical invalidation (UniFi workaround)"
+    echo "REVOKE BY VOUCHER CODE -- surgical invalidation (UniFi workaround)"
     echo "============================================================================"
 
     if [[ "$VCH_RC" != "ok" ]]; then
-        log "ERROR: stat/voucher data unavailable (rc=$VCH_RC) — aborting."
+        log "ERROR: stat/voucher data unavailable (rc=$VCH_RC) -- aborting."
         return
     fi
     if [[ "$GUEST_RC" != "ok" ]]; then
-        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) — aborting to prevent unintended client forget."
+        log "ERROR: stat/guest data unavailable (rc=$GUEST_RC) -- aborting to prevent unintended client forget."
         return
     fi
     if [[ "$STA_RC" != "ok" ]]; then
-        log "ERROR: stat/sta data unavailable (rc=$STA_RC) — aborting to prevent unintended client disconnect."
+        log "ERROR: stat/sta data unavailable (rc=$STA_RC) -- aborting to prevent unintended client disconnect."
         return
     fi
 
     mapfile -t ACTIVE_VOUCHERS < <(echo "$VOUCHER" | jq -r '
         .data[]
         | select(.used > 0)
-        | [.code, (.note // "—"), (.used | tostring)]
+        | [.code, (.note // "--"), (.used | tostring)]
         | @tsv
     ' 2>/dev/null | sort -t$'\t' -k2)
 
@@ -730,24 +730,24 @@ interactive_revoke_by_code() {
     fi
 
     echo ""
-    echo "  Active vouchers:"
+    echo "Active vouchers:"
     echo ""
-    printf "  %-15s  %-20s  %s\n" "CODE" "NAME" "USED"
-    printf "  %-15s  %-20s  %s\n" "---------------" "--------------------" "----"
+    printf " %-15s %-20s %s\n" "CODE" "NAME" "USED"
+    printf " %-15s %-20s %s\n" "---------------" "--------------------" "----"
     for row in "${ACTIVE_VOUCHERS[@]}"; do
         local code note used
         code=$(echo "$row" | awk -F'\t' '{print $1}')
         note=$(echo "$row" | awk -F'\t' '{print $2}')
         used=$(echo "$row" | awk -F'\t' '{print $3}')
-        printf "  %-15s  %-20s  %s\n" "$code" "$note" "$used"
+        printf " %-15s %-20s %s\n" "$code" "$note" "$used"
     done
 
     echo ""
-    echo "  NOTE: This list shows vouchers currently reported by stat/voucher."
-    echo "  Vouchers deleted manually from the UniFi UI will not appear here"
-    echo "  but can still be revoked — enter their code directly if you know it."
+    echo "NOTE: This list shows vouchers currently reported by stat/voucher."
+    echo "Vouchers deleted manually from the UniFi UI will not appear here"
+    echo "but can still be revoked -- enter their code directly if you know it."
     echo ""
-    read -rp "  Enter voucher code to revoke: " TARGET_CODE
+    read -rp " Enter voucher code to revoke: " TARGET_CODE
     TARGET_CODE=$(echo "$TARGET_CODE" | tr -d '[:space:]')
 
     if [ -z "$TARGET_CODE" ]; then
@@ -757,11 +757,11 @@ interactive_revoke_by_code() {
 
     local target_note
     target_note=$(printf '%s\n' "${ACTIVE_VOUCHERS[@]}" | awk -F'\t' -v code="$TARGET_CODE" '$1 == code {print $2}')
-    [ -z "$target_note" ] && target_note="manually deleted — not in stat/voucher"
+    [ -z "$target_note" ] && target_note="manually deleted -- not in stat/voucher"
 
     echo ""
-    echo "  Code : $TARGET_CODE"
-    echo "  Name : $target_note"
+    echo "Code : $TARGET_CODE"
+    echo "Name : $target_note"
     echo ""
 
     local voucher_id
@@ -777,7 +777,7 @@ interactive_revoke_by_code() {
             && log "Deleted voucher: $TARGET_CODE" \
             || log "WARNING: Failed to delete voucher from stat/voucher (rc=$rc)"
     else
-        log "Voucher not in stat/voucher (manually deleted) — proceeding with cleanup..."
+        log "Voucher not in stat/voucher (manually deleted) -- proceeding with cleanup..."
     fi
 
     mapfile -t GUEST_MACS < <(echo "$GUEST" | jq -r --arg code "$TARGET_CODE" '
@@ -801,7 +801,7 @@ interactive_revoke_by_code() {
     fi
 
     echo ""
-    echo "  Client records linked to this code (${#ALL_MACS[@]}):"
+    echo "Client records linked to this code (${#ALL_MACS[@]}):"
     echo ""
     for mac in "${ALL_MACS[@]}"; do
         local hostname
@@ -812,11 +812,11 @@ interactive_revoke_by_code() {
         echo "$STA" | jq -e --arg m "$mac" \
             '.data[] | select((.mac | ascii_downcase) == $m)' &>/dev/null \
             && active_flag=" [CONNECTED]"
-        printf "    %-20s  %-25s%s\n" "$mac" "$hostname" "$active_flag"
+        printf " %-20s %-25s%s\n" "$mac" "$hostname" "$active_flag"
     done
 
     echo ""
-    read -rp "  Confirm revocation of ${#ALL_MACS[@]} client(s) for code $TARGET_CODE? [y/N]: " CONFIRM
+    read -rp " Confirm revocation of ${#ALL_MACS[@]} client(s) for code $TARGET_CODE? [y/N]: " CONFIRM
     [[ ! "$CONFIRM" =~ ^[yY]$ ]] && log "Cancelled." && return
 
     echo ""
@@ -849,19 +849,19 @@ interactive_revoke_by_code() {
     log "Revocation complete for code: $TARGET_CODE ($target_note)"
 }
 
-# ── Interactive action menu ───────────────────────────────────────────────────
+# -- Interactive action menu ---------------------------------------------------
 echo ""
 echo "============================================================================"
-echo " AVAILABLE ACTIONS"
+echo "AVAILABLE ACTIONS"
 echo "============================================================================"
-echo "  [1] Delete unused vouchers   - never activated"
-echo "  [2] Forget clients no voucher - never used a voucher"
-echo "  [3] Delete expired vouchers  - remove + forget their clients"
-echo "  [4] Revoke by voucher code   - surgical invalidation by code"
-echo "  [5] Purge everything         - DELETE all vouchers and history"
-echo "  [q] Quit"
+echo "[1] Delete unused vouchers - never activated"
+echo "[2] Forget clients no voucher - never used a voucher"
+echo "[3] Delete expired vouchers - remove + forget their clients"
+echo "[4] Revoke by voucher code - surgical invalidation by code"
+echo "[5] Purge everything - DELETE all vouchers and history"
+echo "[q] Quit"
 echo ""
-read -rp "  Your choice: " ACTION
+read -rp " Your choice: " ACTION
 
 case "$ACTION" in
     1) interactive_delete_unused ;;

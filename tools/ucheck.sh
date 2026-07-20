@@ -3,60 +3,62 @@
 #
 ################################################################################
 #
-# ucheck - MAC Address Consistency Checker (uhotspot) — Interactive Menu
+# ucheck - MAC Address Consistency Checker (uhotspot) -- Interactive Menu
 #
 # DESCRIPTION:
-#   Diagnostic tool that verifies the presence and consistency of one or more
-#   MAC addresses across all DHCP/ACL data sources used by pydhcpd and
-#   uhotspot. Designed for troubleshooting client connectivity issues and
-#   validating that ACL state is coherent after lease/block operations.
+# Diagnostic tool that verifies the presence and consistency of one or more
+# MAC addresses across all DHCP/ACL data sources used by pydhcpd and
+# uhotspot. Designed for troubleshooting client connectivity issues and
+# validating that ACL state is coherent after lease/block operations.
 #
 # USAGE:
-#   sudo bash ucheck.sh
+# sudo bash ucheck.sh
 #
 # MENU OPTIONS:
-#   1. Check MAC          - verify a single MAC across all data sources
-#   2. Grace period       - list all MACs in grace period with time remaining
-#   3. Consistency check  - check all MACs from all sources + system summary
-#   4. Search by IP/name  - find MAC by IP or hostname and run consistency check
-#   5. UniFi unauthorized - clients connected to the hotspot ESSID that
-#                            UniFi reports as NOT authorized (direct query
-#                            to the UniFi API via stat/sta, not the local
-#                            ACL files)
-#   6. Exit
+# 1. Check MAC - verify a single MAC across all data sources
+# 2. Grace period - list all MACs in grace period with time remaining
+# 3. Consistency check - check all MACs from all sources + system summary
+# 4. Search by IP/name - find MAC by IP or hostname and run consistency check
+# 5. UniFi unauthorized - clients connected to the hotspot ESSID that
+# UniFi reports as NOT authorized (direct query
+# to the UniFi API via stat/sta, not the local
+# ACL files)
+# 6. Exit
 #
 # DATA SOURCES CHECKED:
-#   umacauth.txt    - Clients with an active voucher (hotspot authorized)
-#   ugrace.txt      - Clients in the grace period (no voucher yet)
-#   blockdhcp.txt      - Blocked MACs (grace expired without voucher)
-#   acl_mac/*.txt      - Permanent ACL lists (proxy, unlimited)
-#   pydhcpd.leases     - Active DHCP lease file
-#   UniFi stat/sta     - Live state of the UniFi controller (option 5 only;
-#                        requires UNIFI_* credentials in uhotspot.conf, not
-#                        used elsewhere in the script)
+# umacauth.txt - Clients with an active voucher (hotspot authorized)
+# ugrace.txt - Clients in the grace period (no voucher yet)
+# blockdhcp.txt - Blocked MACs (grace expired without voucher)
+# acl_mac/*.txt - Permanent ACL lists (proxy, unlimited)
+# pydhcpd.leases - Active DHCP lease file
+# UniFi stat/sta - Live state of the UniFi controller (option 5 only;
+# requires UNIFI_* credentials in uhotspot.conf, not
+# used elsewhere in the script)
 #
 # CONSISTENCY RULES:
-#   A MAC should appear in only one logical state at a time. The checker
-#   flags violations but some transient states are expected:
+# A MAC should appear in only one logical state at a time. The checker
+# flags violations but some transient states are expected:
 #
-#   State            | Expected presence
-#   -----------------+---------------------------------------------------
-#   Blocked          | blockdhcp only. NOT in acl_mac, grace or leases
-#   Grace period     | ugrace Y, leases Y (may be absent briefly
-#                    | due to short 60s pool lease and limited range)
-#   ACL permanent    | acl_mac Y, NOT in blockdhcp
-#   Hotspot auth     | umacauth Y, ugrace N (removed by clean_grace_list)
+# State | Expected presence
+# -----------------+---------------------------------------------------
+# Blocked | blockdhcp only. NOT in acl_mac, grace or leases
+# Grace period | ugrace Y, leases Y (may be absent briefly
+# | due to short 60s pool lease and limited range)
+# ACL permanent | acl_mac Y, NOT in blockdhcp
+# Hotspot auth | umacauth Y, ugrace N (removed by clean_grace_list)
 #
 # EXIT CODES:
-#   0 - Normal exit
-#   1 - Already running
-#   2 - Usage error (not root)
+# 0 - Normal exit
+# 1 - Already running
+# 2 - Usage error (not root)
 #
 # REQUIREMENTS:
-#   - Root privileges (files are owned by root / pydhcpd)
-#   - pydhcpd and uhotspot installed with standard paths
+# - Root privileges (files are owned by root / pydhcpd)
+# - pydhcpd and uhotspot installed with standard paths
 #
 ################################################################################
+
+set -uo pipefail
 
 ## root check
 if [ "$(id -u)" -ne 0 ]; then
@@ -72,8 +74,6 @@ if ! flock -n 200; then
     echo "Script $(basename "$0") is already running" >&2
     exit 1
 fi
-
-set -uo pipefail
 
 _UHOTSPOT_CONF="/etc/uhotspot/uhotspot.conf"
 _grace=""
@@ -94,7 +94,7 @@ ACL_MAC_DIR="${ACL_MAC_PATH:-/etc/acl/acl_mac}"
 LEASES_FILE="/etc/pydhcp/pydhcpd.leases"
 
 # Path to the full configuration file (contains UniFi credentials).
-# Only used in option 5 — the rest of the script does not need it.
+# Only used in option 5 -- the rest of the script does not need it.
 HOTSPOT_CONF="/etc/uhotspot/uhotspot.conf"
 
 # Colors
@@ -112,13 +112,13 @@ fi
 OK="${GREEN}Y${NC}"
 NO="${RED}N${NC}"
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# --- Helpers -----------------------------------------------------------------
 warn() {
-    printf "  ${YELLOW}[!] %s${NC}\n" "$*"
+    printf " ${YELLOW}[!] %s${NC}\n" "$*"
 }
 
 info() {
-    printf "  ${CYAN}[i] %s${NC}\n" "$*"
+    printf " ${CYAN}[i] %s${NC}\n" "$*"
 }
 
 found_in() {
@@ -135,10 +135,10 @@ valid_mac() {
 
 press_enter() {
     echo ""
-    read -rp "  Press ENTER to continue..." _
+    read -rp " Press ENTER to continue..." _
 }
 
-# ─── Option 1: Check single MAC ──────────────────────────────────────────────
+# --- Option 1: Check single MAC ----------------------------------------------
 check_mac() {
     local mac="$1"
     local warnings=0
@@ -147,24 +147,24 @@ check_mac() {
 
     local in_hotspot=0 in_grace=0 in_block=0 in_acl=0 in_leases=0
 
-    printf "  umacauth.txt:   "
+    printf " umacauth.txt: "
     if found_in "$mac" "$MAC_HOTSPOT"; then in_hotspot=1; printf "$OK\n"; else printf "$NO\n"; fi
 
-    printf "  ugrace.txt:     "
+    printf " ugrace.txt: "
     if found_in "$mac" "$GRACE_DHCP"; then in_grace=1; printf "$OK\n"; else printf "$NO\n"; fi
 
-    printf "  blockdhcp.txt:     "
+    printf " blockdhcp.txt: "
     if found_in "$mac" "$BLOCK_DHCP"; then in_block=1; printf "$OK\n"; else printf "$NO\n"; fi
 
-    printf "  acl_mac/*.txt:     "
+    printf " acl_mac/*.txt: "
     if grep -rqi "$mac" "$ACL_MAC_DIR"/ 2>/dev/null; then
         in_acl=1; printf "$OK\n"
-        grep -rli "$mac" "$ACL_MAC_DIR"/ 2>/dev/null | sed 's/^/        /'
+        grep -rli "$mac" "$ACL_MAC_DIR"/ 2>/dev/null | sed 's/^/ /'
     else
         printf "$NO\n"
     fi
 
-    printf "  pydhcpd.leases:    "
+    printf " pydhcpd.leases: "
     if found_in_leases "$mac" "$LEASES_FILE"; then in_leases=1; printf "$OK\n"; else printf "$NO\n"; fi
 
     # Grace period time remaining
@@ -175,17 +175,17 @@ check_mac() {
         if [[ "$ts" =~ ^[0-9]+$ ]]; then
             remaining=$(( (ts + BLOCKDHCP_GRACE_SECONDS) - $(date +%s) ))
             if (( remaining > 0 )); then
-                printf "  Grace expires in : ${GREEN}%dh %dm${NC}\n" "$((remaining/3600))" "$(( (remaining%3600)/60 ))"
+                printf " Grace expires in : ${GREEN}%dh %dm${NC}\n" "$((remaining/3600))" "$(( (remaining%3600)/60 ))"
             else
-                printf "  Grace expires in : ${RED}EXPIRED${NC}\n"
+                printf " Grace expires in : ${RED}EXPIRED${NC}\n"
             fi
         fi
     fi
 
     # Consistency checks
     if [ $in_block -eq 1 ]; then
-        [ $in_acl -eq 1 ]    && { warn "In blockdhcp AND acl_mac -- should be in one, not both"; warnings=$((warnings+1)); }
-        [ $in_grace -eq 1 ]  && { warn "In blockdhcp AND ugrace -- contradictory state"; warnings=$((warnings+1)); }
+        [ $in_acl -eq 1 ] && { warn "In blockdhcp AND acl_mac -- should be in one, not both"; warnings=$((warnings+1)); }
+        [ $in_grace -eq 1 ] && { warn "In blockdhcp AND ugrace -- contradictory state"; warnings=$((warnings+1)); }
         [ $in_leases -eq 1 ] && { warn "In blockdhcp AND leases -- lease should have been cleared"; warnings=$((warnings+1)); }
     fi
 
@@ -201,7 +201,7 @@ check_mac() {
 
     local total=$((in_hotspot + in_grace + in_block + in_acl + in_leases))
     if [ $total -eq 0 ]; then
-        printf "  ${YELLOW}[!] MAC not found in any data source${NC}\n"
+        printf " ${YELLOW}[!] MAC not found in any data source${NC}\n"
     fi
 
     echo ""
@@ -212,23 +212,23 @@ menu_check_mac() {
     echo ""
     local mac
     while true; do
-        read -rp "  Enter MAC address (XX:XX:XX:XX:XX:XX): " mac
+        read -rp " Enter MAC address (XX:XX:XX:XX:XX:XX): " mac
         mac=$(echo "$mac" | xargs | tr '[:upper:]' '[:lower:]')
         if valid_mac "$mac"; then
             break
         fi
-        printf "  ${RED}Invalid MAC format, try again${NC}\n"
+        printf " ${RED}Invalid MAC format, try again${NC}\n"
     done
     echo ""
     check_mac "$mac"
     press_enter
 }
 
-# ─── Option 2: Grace period status ───────────────────────────────────────────
+# --- Option 2: Grace period status -------------------------------------------
 menu_grace_period() {
     echo ""
     if [ ! -f "$GRACE_DHCP" ]; then
-        printf "  ${RED}File not found: %s${NC}\n" "$GRACE_DHCP"
+        printf " ${RED}File not found: %s${NC}\n" "$GRACE_DHCP"
         press_enter
         return
     fi
@@ -236,8 +236,8 @@ menu_grace_period() {
     local now total=0 expired=0
     now=$(date +%s)
 
-    printf "  ${WHITE}%-20s %-18s %-25s %s${NC}\n" "MAC" "IP" "NAME" "EXPIRES IN"
-    printf "  %s\n" "$(printf -- '-%.0s' {1..75})"
+    printf " ${WHITE}%-20s %-18s %-25s %s${NC}\n" "MAC" "IP" "NAME" "EXPIRES IN"
+    printf " %s\n" "$(printf -- '-%.0s' {1..75})"
 
     while IFS=';' read -r _ mac ip name ts _rest; do
         [[ -z "$mac" || -z "$ts" ]] && continue
@@ -255,22 +255,22 @@ menu_grace_period() {
             else
                 color="$GREEN"
             fi
-            printf "  %-20s %-18s %-25s ${color}%dh %dm${NC}\n" "$mac" "$ip" "$name" "$h" "$m"
+            printf " %-20s %-18s %-25s ${color}%dh %dm${NC}\n" "$mac" "$ip" "$name" "$h" "$m"
         else
             expired=$((expired+1))
-            printf "  %-20s %-18s %-25s ${RED}EXPIRED${NC}\n" "$mac" "$ip" "$name"
+            printf " %-20s %-18s %-25s ${RED}EXPIRED${NC}\n" "$mac" "$ip" "$name"
         fi
     done < "$GRACE_DHCP"
 
     echo ""
-    printf "  Total: %d  |  Expired: %d  |  Active: %d\n" "$total" "$expired" "$((total-expired))"
+    printf " Total: %d | Expired: %d | Active: %d\n" "$total" "$expired" "$((total-expired))"
     press_enter
 }
 
-# ─── Option 3: Consistency check + system summary ────────────────────────────
+# --- Option 3: Consistency check + system summary ----------------------------
 menu_consistency() {
     echo ""
-    printf "  ${CYAN}Collecting all MACs from all data sources...${NC}\n\n"
+    printf " ${CYAN}Collecting all MACs from all data sources...${NC}\n\n"
 
     # Collect all unique MACs
     local tmpfile
@@ -298,18 +298,18 @@ menu_consistency() {
 
     for mac in "${all_macs[@]}"; do
         # Count per state for summary
-        found_in "$mac" "$MAC_HOTSPOT"   && cnt_hotspot=$((cnt_hotspot+1))
-        found_in "$mac" "$GRACE_DHCP"    && cnt_grace=$((cnt_grace+1))
-        found_in "$mac" "$BLOCK_DHCP"    && cnt_block=$((cnt_block+1))
+        found_in "$mac" "$MAC_HOTSPOT" && cnt_hotspot=$((cnt_hotspot+1))
+        found_in "$mac" "$GRACE_DHCP" && cnt_grace=$((cnt_grace+1))
+        found_in "$mac" "$BLOCK_DHCP" && cnt_block=$((cnt_block+1))
         grep -rqi "$mac" "$ACL_MAC_DIR"/ 2>/dev/null && cnt_acl=$((cnt_acl+1))
         found_in_leases "$mac" "$LEASES_FILE" && cnt_leases=$((cnt_leases+1))
 
         # Run consistency check (only print if warnings)
         local w=0
         local in_hotspot=0 in_grace=0 in_block=0 in_acl=0 in_leases=0
-        found_in "$mac" "$MAC_HOTSPOT"   && in_hotspot=1
-        found_in "$mac" "$GRACE_DHCP"    && in_grace=1
-        found_in "$mac" "$BLOCK_DHCP"    && in_block=1
+        found_in "$mac" "$MAC_HOTSPOT" && in_hotspot=1
+        found_in "$mac" "$GRACE_DHCP" && in_grace=1
+        found_in "$mac" "$BLOCK_DHCP" && in_block=1
         grep -rqi "$mac" "$ACL_MAC_DIR"/ 2>/dev/null && in_acl=1
         found_in_leases "$mac" "$LEASES_FILE" && in_leases=1
 
@@ -341,35 +341,35 @@ menu_consistency() {
 
     # Summary
     printf "${WHITE}=== SYSTEM SUMMARY ===${NC}\n"
-    printf "  MACs found total  : %d\n" "${#all_macs[@]}"
-    printf "  Grace period      : %d\n" "$cnt_grace"
-    printf "  Blocked           : %d\n" "$cnt_block"
-    printf "  ACL permanent     : %d\n" "$cnt_acl"
-    printf "  Hotspot auth      : %d\n" "$cnt_hotspot"
-    printf "  Active leases     : %d\n" "$cnt_leases"
+    printf " MACs found total : %d\n" "${#all_macs[@]}"
+    printf " Grace period : %d\n" "$cnt_grace"
+    printf " Blocked : %d\n" "$cnt_block"
+    printf " ACL permanent : %d\n" "$cnt_acl"
+    printf " Hotspot auth : %d\n" "$cnt_hotspot"
+    printf " Active leases : %d\n" "$cnt_leases"
     if [ $total_warnings -eq 0 ]; then
-        printf "  Warnings          : ${GREEN}0${NC}\n"
+        printf " Warnings : ${GREEN}0${NC}\n"
     else
-        printf "  Warnings          : ${RED}%d${NC}\n" "$total_warnings"
+        printf " Warnings : ${RED}%d${NC}\n" "$total_warnings"
     fi
 
     press_enter
 }
 
-# ─── Option 4: Search by IP or hostname ──────────────────────────────────────
+# --- Option 4: Search by IP or hostname --------------------------------------
 menu_search() {
     echo ""
     local query
-    read -rp "  Enter IP address or hostname: " query
+    read -rp " Enter IP address or hostname: " query
     query=$(echo "$query" | xargs | tr '[:upper:]' '[:lower:]')
     if [ -z "$query" ]; then
-        printf "  ${RED}Empty query${NC}\n"
+        printf " ${RED}Empty query${NC}\n"
         press_enter
         return
     fi
 
     echo ""
-    printf "  ${CYAN}Searching for: %s${NC}\n\n" "$query"
+    printf " ${CYAN}Searching for: %s${NC}\n\n" "$query"
 
     local found_macs=()
     local tmpfile
@@ -397,12 +397,12 @@ menu_search() {
     rm -f "$tmpfile"
 
     if [ ${#found_macs[@]} -eq 0 ]; then
-        printf "  ${YELLOW}No MACs found matching: %s${NC}\n" "$query"
+        printf " ${YELLOW}No MACs found matching: %s${NC}\n" "$query"
         press_enter
         return
     fi
 
-    printf "  Found %d MAC(s):\n\n" "${#found_macs[@]}"
+    printf " Found %d MAC(s):\n\n" "${#found_macs[@]}"
     for mac in "${found_macs[@]}"; do
         check_mac "$mac"
     done
@@ -410,7 +410,7 @@ menu_search() {
     press_enter
 }
 
-# ─── Option 5: unauthorized clients in UniFi ─────────────────────────────────
+# --- Option 5: unauthorized clients in UniFi ---------------------------------
 
 # Loads the UNIFI_* variables from uhotspot.conf, but only if the file is
 # owned by root and has no write permission for group/other (the same
@@ -419,7 +419,7 @@ menu_search() {
 # with potentially compromised credentials.
 load_unifi_config() {
     if [ ! -f "$HOTSPOT_CONF" ]; then
-        printf "  ${RED}%s not found${NC}\n" "$HOTSPOT_CONF"
+        printf " ${RED}%s not found${NC}\n" "$HOTSPOT_CONF"
         return 1
     fi
 
@@ -429,7 +429,7 @@ load_unifi_config() {
     gdigit="${perms: -2:1}"
     odigit="${perms: -1}"
     if [[ "$owner" != "root" ]] || [[ "$gdigit" != "0" ]] || [[ "$odigit" != "0" ]]; then
-        printf "  ${RED}%s has unsafe owner/permissions (owner=%s perms=%s) -- must be owned by root with no group/other access (600) -- not loaded${NC}\n" \
+        printf " ${RED}%s has unsafe owner/permissions (owner=%s perms=%s) -- must be owned by root with no group/other access (600) -- not loaded${NC}\n" \
             "$HOTSPOT_CONF" "$owner" "$perms"
         return 1
     fi
@@ -439,13 +439,13 @@ load_unifi_config() {
 
     local missing=()
     [[ -z "${UNIFI_CONTROLLER_URL:-}" ]] && missing+=("UNIFI_CONTROLLER_URL")
-    [[ -z "${UNIFI_USERNAME:-}"       ]] && missing+=("UNIFI_USERNAME")
-    [[ -z "${UNIFI_PASSWORD:-}"       ]] && missing+=("UNIFI_PASSWORD")
-    [[ -z "${UNIFI_TYPE:-}"           ]] && missing+=("UNIFI_TYPE")
-    [[ -z "${UNIFI_SITE:-}"           ]] && missing+=("UNIFI_SITE")
-    [[ -z "${HOTSPOT_ESSID:-}"        ]] && missing+=("HOTSPOT_ESSID")
+    [[ -z "${UNIFI_USERNAME:-}" ]] && missing+=("UNIFI_USERNAME")
+    [[ -z "${UNIFI_PASSWORD:-}" ]] && missing+=("UNIFI_PASSWORD")
+    [[ -z "${UNIFI_TYPE:-}" ]] && missing+=("UNIFI_TYPE")
+    [[ -z "${UNIFI_SITE:-}" ]] && missing+=("UNIFI_SITE")
+    [[ -z "${HOTSPOT_ESSID:-}" ]] && missing+=("HOTSPOT_ESSID")
     if (( ${#missing[@]} > 0 )); then
-        printf "  ${RED}Missing variables in %s: %s${NC}\n" "$HOTSPOT_CONF" "${missing[*]}"
+        printf " ${RED}Missing variables in %s: %s${NC}\n" "$HOTSPOT_CONF" "${missing[*]}"
         return 1
     fi
     return 0
@@ -470,12 +470,12 @@ menu_unifi_unauthorized() {
         sta_url="${UNIFI_CONTROLLER_URL}/api/s/${UNIFI_SITE}/stat/sta"
     fi
 
-    printf "  ${CYAN}Connecting to %s...${NC}\n" "$UNIFI_CONTROLLER_URL"
+    printf " ${CYAN}Connecting to %s...${NC}\n" "$UNIFI_CONTROLLER_URL"
 
     local hdr token payload
     hdr=$(mktemp)
-    # Pass credentials to jq via environment and the body to curl via stdin —
-    # not --arg / -d — so the plaintext password never appears in either
+    # Pass credentials to jq via environment and the body to curl via stdin --
+    # not --arg / -d -- so the plaintext password never appears in either
     # process's argv (readable by any local user via /proc/<pid>/cmdline).
     payload=$(UH_JQ_USER="$UNIFI_USERNAME" UH_JQ_PASS="$UNIFI_PASSWORD" jq -n \
         '{username: env.UH_JQ_USER, password: env.UH_JQ_PASS}')
@@ -492,7 +492,7 @@ menu_unifi_unauthorized() {
     rm -f "$hdr"
 
     if [[ -z "$token" ]]; then
-        printf "  ${RED}Login failed -- check UNIFI_USERNAME/UNIFI_PASSWORD/UNIFI_CONTROLLER_URL in %s${NC}\n" "$HOTSPOT_CONF"
+        printf " ${RED}Login failed -- check UNIFI_USERNAME/UNIFI_PASSWORD/UNIFI_CONTROLLER_URL in %s${NC}\n" "$HOTSPOT_CONF"
         press_enter
         return
     fi
@@ -510,7 +510,7 @@ menu_unifi_unauthorized() {
         -b "${cookie_name}=${token}" "$sta_url" -o "$sta_json" 2>/dev/null
 
     echo ""
-    printf "  ${WHITE}=== Clients on %s NOT authorized by UniFi ===${NC}\n\n" "$HOTSPOT_ESSID"
+    printf " ${WHITE}=== Clients on %s NOT authorized by UniFi ===${NC}\n\n" "$HOTSPOT_ESSID"
 
     local rows
     rows=$(jq -r --arg essid "$HOTSPOT_ESSID" '
@@ -522,35 +522,35 @@ menu_unifi_unauthorized() {
     rm -f "$sta_json"
 
     if [[ -z "$rows" ]]; then
-        printf "  ${GREEN}None -- all clients on %s are authorized${NC}\n" "$HOTSPOT_ESSID"
+        printf " ${GREEN}None -- all clients on %s are authorized${NC}\n" "$HOTSPOT_ESSID"
     else
-        printf "  ${WHITE}%-20s %-25s %-18s %s${NC}\n" "MAC" "HOSTNAME" "IP" "LAST_SEEN"
-        printf "  %s\n" "$(printf -- '-%.0s' {1..80})"
+        printf " ${WHITE}%-20s %-25s %-18s %s${NC}\n" "MAC" "HOSTNAME" "IP" "LAST_SEEN"
+        printf " %s\n" "$(printf -- '-%.0s' {1..80})"
         while IFS=$'\t' read -r mac hostname ip last_seen; do
             [[ -z "$mac" ]] && continue
-            printf "  %-20s %-25s %-18s %s\n" "$mac" "$hostname" "$ip" "$last_seen"
+            printf " %-20s %-25s %-18s %s\n" "$mac" "$hostname" "$ip" "$last_seen"
         done <<< "$rows"
     fi
 
     press_enter
 }
 
-# ─── Main menu ───────────────────────────────────────────────────────────────
+# --- Main menu ---------------------------------------------------------------
 main_menu() {
     while true; do
         clear
         printf "${WHITE}########################################${NC}\n"
-        printf "${WHITE}#     ucheck -- MAC Diagnostic Tool    #${NC}\n"
+        printf "${WHITE}# ucheck -- MAC Diagnostic Tool #${NC}\n"
         printf "${WHITE}########################################${NC}\n"
         echo ""
-        printf "  1. Check MAC\n"
-        printf "  2. Grace period status\n"
-        printf "  3. Consistency check + system summary\n"
-        printf "  4. Search by IP or hostname\n"
-        printf "  5. UniFi: unauthorized clients on the ESSID\n"
-        printf "  6. Exit\n"
+        printf " 1. Check MAC\n"
+        printf " 2. Grace period status\n"
+        printf " 3. Consistency check + system summary\n"
+        printf " 4. Search by IP or hostname\n"
+        printf " 5. UniFi: unauthorized clients on the ESSID\n"
+        printf " 6. Exit\n"
         echo ""
-        read -rp "  Select option [1-6]: " opt
+        read -rp " Select option [1-6]: " opt
         case "$opt" in
             1) menu_check_mac ;;
             2) menu_grace_period ;;
@@ -558,7 +558,7 @@ main_menu() {
             4) menu_search ;;
             5) menu_unifi_unauthorized ;;
             6) echo ""; exit 0 ;;
-            *) printf "  ${RED}Invalid option${NC}\n"; sleep 1 ;;
+            *) printf " ${RED}Invalid option${NC}\n"; sleep 1 ;;
         esac
     done
 }

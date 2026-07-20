@@ -2,7 +2,7 @@
 # maravento.com
 
 ################################################################################
-# THIS IS AN EXAMPLE SCRIPT — DO NOT USE IN PRODUCTION
+# THIS IS AN EXAMPLE SCRIPT -- DO NOT USE IN PRODUCTION
 # Adapt interface names, IPs, and ACL paths to your environment.
 # See the full reference implementation and README at:
 # https://github.com/maravento/uhotspot
@@ -10,25 +10,25 @@
 
 ################################################################################
 #
-# Iptables/Ipset Firewall O(1) — Iptables script
+# Iptables/Ipset Firewall O(1) -- Iptables script
 #
 # DESCRIPTION:
 ## Verify: iptables -L -n / iptables -nvL / iptables -Ln -t mangle / iptables -Ln -t nat
 ## Sockets: ss -ltuna
 # Ports: /etc/services
 # ============================
-# Ports 0-1023:     "Well-known ports" (System/Privileged)
-#                   - Require superuser privileges to bind
-#                   - Standard services: HTTP(80), HTTPS(443), SSH(22), DNS(53)
-#                   - FTP(21), Telnet(23), SMTP(25), etc.
+# Ports 0-1023: "Well-known ports" (System/Privileged)
+# - Require superuser privileges to bind
+# - Standard services: HTTP(80), HTTPS(443), SSH(22), DNS(53)
+# - FTP(21), Telnet(23), SMTP(25), etc.
 # Ports 1024-49151: "Registered ports" (IANA Assigned)
-#                   - Assigned by Internet Assigned Numbers Authority
-#                   - User/application services without root privileges
-#                   - Examples: MySQL(3306), PostgreSQL(5432), Skype(1000-10000)
+# - Assigned by Internet Assigned Numbers Authority
+# - User/application services without root privileges
+# - Examples: MySQL(3306), PostgreSQL(5432), Skype(1000-10000)
 # Ports 49152-65535: "Dynamic/Private ports" (Ephemeral)
-#                    - Available for any use, not registered by IANA
-#                    - Used for temporary/outbound connections
-#                    - Client-side dynamic port assignments
+# - Available for any use, not registered by IANA
+# - Used for temporary/outbound connections
+# - Client-side dynamic port assignments
 # REFERENCES:
 # - https://gutl.jovenclub.cu/wiki/doku.php?id=definiciones:puertos_tcp_udp
 # - https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers
@@ -37,20 +37,13 @@
 #
 ################################################################################
 
+set -euo pipefail
+
 # logging
 log_file="/var/log/uhotspot.log"
 log() {
     local msg="$1"
     echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" | tee -a "$log_file" 2>/dev/null || true
-}
-
-# MAC/IP validation before feeding external ACL data into ipset
-is_valid_mac() {
-    [[ "$1" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$ ]]
-}
-
-is_valid_ip() {
-    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
 }
 
 ## root check
@@ -61,18 +54,26 @@ fi
 
 # prevent overlapping runs
 SCRIPT_LOCK="/var/lock/$(basename "$0" .sh).lock"
+(umask 077; : >> "$SCRIPT_LOCK")
 exec 200>"$SCRIPT_LOCK"
 if ! flock -n 200; then
     log "Script $(basename "$0") is already running"
     exit 1
 fi
 
-set -euo pipefail
-
 # Start
 log "uiptables start..."
 
 # VARIABLES ##
+
+# MAC/IP validation before feeding external ACL data into ipset
+is_valid_mac() {
+    [[ "$1" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$ ]]
+}
+
+is_valid_ip() {
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
 
 # Load all configuration from uhotspot.conf (network, paths, interfaces).
 # Safe key=value parsing - file is never sourced to prevent code execution.
@@ -83,7 +84,7 @@ _load_conf() {
     [[ ! -f "$file" ]] && { log "WARNING: $file not found - using built-in defaults"; return 1; }
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*[#] ]] && continue
-        [[ "$line" =~ ^[[:space:]]*$    ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
         key="${line%%=*}"
         value="${line#*=}"
         value="${value%\"}"
@@ -172,7 +173,7 @@ sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1
 # CONNECTION TRACKING
 # nf_conntrack_max/buckets only exist under /proc/sys once the nf_conntrack
 # kernel module is loaded. On a cold boot this script can run before
-# anything else has triggered that module to load — sysctl -w then fails on
+# anything else has triggered that module to load -- sysctl -w then fails on
 # a nonexistent key, and since output is silenced (>/dev/null 2>&1) with no
 # `|| true`, that failure is invisible and takes down the whole script under
 # set -e. Force the module to load first so this never depends on boot timing.
@@ -326,27 +327,27 @@ done
 iptables -t mangle -A PREROUTING -i "$lan" -m set --match-set bogons src -j DROP
 iptables -t mangle -A PREROUTING -i "$lan" -m set --match-set bogons dst -j DROP
 # WAN DROP: Local Ports (reduce noise) (Optional)
-# 25     TCP - Postfix SMTP (master)
-# 80     TCP - HTTP
-# 3128   TCP - Squid proxy
-# 4330   TCP - PCP pmlogger (Performance Co-Pilot)
-# 5005   TCP - UniFi/Podman (pasta userspace network)
-# 5636   TCP - UniFi/Podman (pasta userspace network)
-# 5671   TCP - UniFi/Podman AMQP (pasta userspace network)
-# 6789   TCP - UniFi speed test (pasta userspace network)
-# 8443   TCP - UniFi HTTPS GUI (pasta userspace network)
-# 8444   TCP - UniFi OS HTTPS GUI (pasta userspace network)
-# 9543   TCP - UniFi/Podman (pasta userspace network)
-# 10000  TCP - Webmin
-# 11084  TCP - UniFi/Podman (pasta userspace network)
-# 11443  TCP - UniFi OS self-hosted GUI (pasta userspace network)
-# 18100  TCP - PAC proxy
-# 18080  TCP - Internal HTTP
-# 18081  TCP - Warning page (bandata)
-# 18082  TCP - Internal HTTP alternate
-# 44321  TCP - PCP pmcd (Performance Co-Pilot daemon)
-# 44322  TCP - PCP pmproxy
-# 44323  TCP - PCP pmproxy HTTPS
+# 25 TCP - Postfix SMTP (master)
+# 80 TCP - HTTP
+# 3128 TCP - Squid proxy
+# 4330 TCP - PCP pmlogger (Performance Co-Pilot)
+# 5005 TCP - UniFi/Podman (pasta userspace network)
+# 5636 TCP - UniFi/Podman (pasta userspace network)
+# 5671 TCP - UniFi/Podman AMQP (pasta userspace network)
+# 6789 TCP - UniFi speed test (pasta userspace network)
+# 8443 TCP - UniFi HTTPS GUI (pasta userspace network)
+# 8444 TCP - UniFi OS HTTPS GUI (pasta userspace network)
+# 9543 TCP - UniFi/Podman (pasta userspace network)
+# 10000 TCP - Webmin
+# 11084 TCP - UniFi/Podman (pasta userspace network)
+# 11443 TCP - UniFi OS self-hosted GUI (pasta userspace network)
+# 18100 TCP - PAC proxy
+# 18080 TCP - Internal HTTP
+# 18081 TCP - Warning page (bandata)
+# 18082 TCP - Internal HTTP alternate
+# 44321 TCP - PCP pmcd (Performance Co-Pilot daemon)
+# 44322 TCP - PCP pmproxy
+# 44323 TCP - PCP pmproxy HTTPS
 iptables -A INPUT -i "$wan" -p tcp -m multiport --dports 25,80,3128,4330,5005,5636,5671,6789,8443,8444,9543,10000,11084,11443,18100 -j DROP
 iptables -A INPUT -i "$wan" -p tcp -m multiport --dports 18080,18081,18082,44321,44322,44323 -j DROP
 iptables -A INPUT -i "$wan" -p udp --dport 5353 -j DROP
@@ -387,22 +388,22 @@ iptables -A INPUT -i "$wan" -p udp --dport 10001 -j ACCEPT
 # Uncomment if using Ubiquiti remote access cloud service
 # iptables -A INPUT -i "$wan" -p tcp -s 66.203.125.0/24 --sport 443 -d "$wan" -j ACCEPT
 # LAN Unifi - ports required for LAN clients and APs to communicate with self-hosted controller
-# 8080  TCP - AP to controller communication
-# 8880  TCP - captive portal HTTP
-# 8881  TCP - captive portal HTTP alternate
-# 8882  TCP - captive portal HTTP alternate
-# 8843  TCP - captive portal HTTPS
-# 6789  TCP - UniFi speed test / throughput measurement (Podman/pasta userspace network)
-# 3478  UDP - STUN for APs
-# 53    UDP - DNS (local on gateway)
-# 123   UDP - NTP
+# 8080 TCP - AP to controller communication
+# 8880 TCP - captive portal HTTP
+# 8881 TCP - captive portal HTTP alternate
+# 8882 TCP - captive portal HTTP alternate
+# 8843 TCP - captive portal HTTPS
+# 6789 TCP - UniFi speed test / throughput measurement (Podman/pasta userspace network)
+# 3478 UDP - STUN for APs
+# 53 UDP - DNS (local on gateway)
+# 123 UDP - NTP
 # 10001 UDP - device discovery
 # Removed (administrative/internal only):
-# 8443  TCP - GUI/API admin access
-# 8444  TCP - UniFi OS HTTPS GUI admin
+# 8443 TCP - GUI/API admin access
+# 8444 TCP - UniFi OS HTTPS GUI admin
 # 11443 TCP - UniFi OS self-hosted GUI admin
 # 27117 TCP - MongoDB internal database
-# 1900  UDP - UPnP optional discovery
+# 1900 UDP - UPnP optional discovery
 unifi_tcp="8080,6789"
 unifi_udp_local="10001"
 unifi_udp_wan="3478,123"
@@ -474,7 +475,7 @@ for mac in $(awk -F";" '$2 != "" {print $2}' "$mac_unlimited_file" 2>/dev/null);
 done
 iptables -t nat -A PREROUTING -i "$lan" -m set --match-set macunlimited src -j ACCEPT
 iptables -t mangle -A PREROUTING -i "$lan" -m set --match-set macunlimited src -j ACCEPT
-# Unlimited devices never use the proxy — block PAC access so DHCP option 252
+# Unlimited devices never use the proxy -- block PAC access so DHCP option 252
 # (WPAD, if enabled) has no effect on them, since pydhcpd is ACL-agnostic and
 # sends it to every client regardless of classification.
 iptables -A INPUT -i "$lan" -p tcp -m multiport --dports 3128,18100 -m set --match-set macunlimited src -j DROP
@@ -644,7 +645,7 @@ if [ -f "$hotspot_path/acl/umacauth.txt" ]; then
 fi
 # UNIFI PORTAL ACCESS + PAC (18100)
 iptables -t mangle -A PREROUTING -i "$lan" -m set --match-set machotspot src -p tcp -m multiport --dports "$cpd_tcp,18100,80" -j ACCEPT
-iptables -A INPUT   -i "$lan" -m set --match-set machotspot src -p tcp -m multiport --dports "$cpd_tcp,18100" -j ACCEPT
+iptables -A INPUT -i "$lan" -m set --match-set machotspot src -p tcp -m multiport --dports "$cpd_tcp,18100" -j ACCEPT
 iptables -A FORWARD -i "$lan" -m set --match-set machotspot src -p tcp -m multiport --dports "$cpd_tcp,18100" -j ACCEPT
 # NAT
 iptables -t nat -A PREROUTING -i "$lan" -p tcp --dport 80 -m set --match-set machotspot src -j REDIRECT --to-port 3128

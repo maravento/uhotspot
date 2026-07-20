@@ -3,32 +3,34 @@
 #
 ################################################################################
 #
-# UniFi Hotspot Log Viewer module installation/uninstallation script for Webmin
+# uhotspotmon - module installation/uninstallation script for Webmin
 #
 # Description:
-#   This script installs or uninstalls the UniFi Hotspot Log Viewer module
-#   for Webmin. Provides real-time log monitoring for the uhotspotd daemon
-#   with live polling, filtering, and full-log search.
+# This script installs or uninstalls the UniFi Hotspot Log Viewer module
+# for Webmin. Provides real-time log monitoring for the uhotspotd daemon
+# with live polling, filtering, and full-log search.
 #
 # Features:
-#   - Real-time log viewer with AJAX polling (no tail -f)
-#   - Live/Pause toggle
-#   - Full-log grep search
-#   - Filter by level (INFO/WARNING/ERROR)
-#   - Text filter with highlighting
-#   - Cycle stats dashboard (vouchers, authorized, grace, etc.)
-#   - Service status indicator
-#   - Multi-language support (English and Spanish)
+# - Real-time log viewer with AJAX polling (no tail -f)
+# - Live/Pause toggle
+# - Full-log grep search
+# - Filter by level (INFO/WARNING/ERROR)
+# - Text filter with highlighting
+# - Cycle stats dashboard (vouchers, authorized, grace, etc.)
+# - Service status indicator
+# - Multi-language support (English and Spanish)
 #
 # Usage:
-#   sudo ./uhotspotmon.sh [OPTIONS]
+# sudo ./uhotspotmon.sh [OPTIONS]
 #
 # Options:
-#   install      Install the module
-#   uninstall    Uninstall the module
-#   -h, --help   Show help message
+# install Install the module
+# uninstall Uninstall the module
+# -h, --help Show help message
 #
 ################################################################################
+
+set -uo pipefail
 
 ## root check
 if [ "$(id -u)" != "0" ]; then
@@ -38,13 +40,12 @@ fi
 
 # prevent overlapping runs
 SCRIPT_LOCK="/var/lock/$(basename "$0" .sh).lock"
+(umask 077; : >> "$SCRIPT_LOCK")
 exec 200>"$SCRIPT_LOCK"
 if ! flock -n 200; then
     echo "Script $(basename "$0") is already running"
     exit 1
 fi
-
-set -e
 
 MODNAME="uhotspot"
 MODDIR="/usr/share/webmin/$MODNAME"
@@ -64,17 +65,17 @@ install_module() {
     mkdir -p "$ETCDIR"
 
     # ============================================================
-    # 1. api.cgi (bash — AJAX endpoint for log polling)
+    # 1. api.cgi (bash -- AJAX endpoint for log polling)
     # ============================================================
     cat > "$MODDIR/api.cgi" <<'APICGI'
 #!/bin/bash
-# api.cgi — AJAX endpoint for uhotspotd log viewer
+# api.cgi -- AJAX endpoint for uhotspotd log viewer
 # Reads /var/log/uhotspot.log via byte offset (never stalls like tail -f)
 #
 # Params (via QUERY_STRING):
-#   action=tail&pos=N&lines=N  — read from byte offset (polling)
-#   action=grep&q=TERM         — full-file grep search
-#   action=status              — service status
+# action=tail&pos=N&lines=N -- read from byte offset (polling)
+# action=grep&q=TERM -- full-file grep search
+# action=status -- service status
 
 LOG_FILE="/var/log/uhotspot.log"
 MAX_GREP=3000
@@ -104,7 +105,7 @@ json_escape() {
     printf '%s' "$s"
 }
 
-# ── Status ────────────────────────────────────────────────────
+# -- Status ----------------------------------------------------
 if [[ "$action" == "status" ]]; then
     active=0
     pid=""
@@ -125,7 +126,7 @@ if [[ "$action" == "status" ]]; then
     exit 0
 fi
 
-# ── File checks ───────────────────────────────────────────────
+# -- File checks -----------------------------------------------
 if [[ ! -f "$LOG_FILE" ]]; then
     echo '{"error":"Log file not found","rows":[]}'
     exit 0
@@ -133,7 +134,7 @@ fi
 
 file_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
 
-# ── Grep ──────────────────────────────────────────────────────
+# -- Grep ------------------------------------------------------
 if [[ "$action" == "grep" ]]; then
     term="${params[q]:-}"
     if [[ -z "$term" ]]; then
@@ -153,7 +154,7 @@ if [[ "$action" == "grep" ]]; then
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         # Skip separator lines
-        [[ "$line" == ─* ]] && continue
+        [[ "$line" == -* ]] && continue
 
         ts="" level="" msg=""
         if [[ "$line" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2})\ (INFO|WARNING|ERROR):\ (.*) ]]; then
@@ -178,7 +179,7 @@ if [[ "$action" == "grep" ]]; then
     exit 0
 fi
 
-# ── Tail (polling by byte offset) ────────────────────────────
+# -- Tail (polling by byte offset) ----------------------------
 pos="${params[pos]:-0}"
 lines="${params[lines]:-200}"
 
@@ -210,7 +211,7 @@ printf '{"rows":['
 first=1
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    [[ "$line" == ─* ]] && continue
+    [[ "$line" == -* ]] && continue
 
     ts="" level="" msg=""
     if [[ "$line" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2})\ (INFO|WARNING|ERROR):\ (.*) ]]; then
@@ -237,11 +238,11 @@ APICGI
     chmod 755 "$MODDIR/api.cgi"
 
     # ============================================================
-    # 2. index.cgi (Perl — main page with Webmin header/footer)
+    # 2. index.cgi (Perl -- main page with Webmin header/footer)
     # ============================================================
     cat > "$MODDIR/index.cgi" <<'INDEXCGI'
 #!/usr/bin/perl
-# UniFi Hotspot Log Viewer — Main interface
+# UniFi Hotspot Log Viewer -- Main interface
 use strict;
 use warnings;
 
@@ -262,65 +263,65 @@ print "Pragma: no-cache\r\n";
 
 print <<'HTMLBLOCK';
 <style>
-/* ── Variables — Light (default) ───────────────────────────── */
+/* -- Variables -- Light (default) ----------------------------- */
 #uhmod{
-  --bg:       #ffffff;
-  --bg2:      #f8f9fa;
-  --bg3:      #f1f3f5;
-  --border:   #dee2e6;
-  --border2:  #e9ecef;
-  --text:     #212529;
-  --text2:    #495057;
-  --text3:    #868e96;
+  --bg: #ffffff;
+  --bg2: #f8f9fa;
+  --bg3: #f1f3f5;
+  --border: #dee2e6;
+  --border2: #e9ecef;
+  --text: #212529;
+  --text2: #495057;
+  --text3: #868e96;
   --ts-color: #6c757d;
   --msg-color:#212529;
   --mc-color: #1565c0;
   --ip-color: #6a1b9a;
   --kw-color: #1b5e20;
-  --hl-bg:    #fff176;
+  --hl-bg: #fff176;
   --hl-color: #333;
   --row-hover:#f1f3f5;
-  --row-new:  #d4edda;
-  --th-bg:    #f1f3f5;
+  --row-new: #d4edda;
+  --th-bg: #f1f3f5;
   --th-color: #495057;
   --scroll-track:#f1f3f5;
   --scroll-thumb:#ced4da;
-  --sb-text:  #6c757d;
-  --cb-bg:    #f8f9fa;
+  --sb-text: #6c757d;
+  --cb-bg: #f8f9fa;
   --stats-bg: #f1f3f5;
-  --grep-bg:  #e8f4fd;
+  --grep-bg: #e8f4fd;
   --grep-border:#90caf9;
   --grep-text:#0d47a1;
   --cap-color:#e65100;
   --st-color: #2e7d32;
 }
-/* ── Variables — Dark ───────────────────────────────────────── */
+/* -- Variables -- Dark ----------------------------------------- */
 #uhmod.dark{
-  --bg:       #0d1117;
-  --bg2:      #161b22;
-  --bg3:      #1c2128;
-  --border:   #21262d;
-  --border2:  #30363d;
-  --text:     #e6edf3;
-  --text2:    #c9d1d9;
-  --text3:    #8b949e;
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #1c2128;
+  --border: #21262d;
+  --border2: #30363d;
+  --text: #e6edf3;
+  --text2: #c9d1d9;
+  --text3: #8b949e;
   --ts-color: #4a6880;
   --msg-color:#c9d1d9;
   --mc-color: #79c0ff;
   --ip-color: #d2a8ff;
   --kw-color: #7ee787;
-  --hl-bg:    #3d2e00;
+  --hl-bg: #3d2e00;
   --hl-color: #ffd700;
   --row-hover:#161b22;
-  --row-new:  #1a3a1a;
-  --th-bg:    #161b22;
+  --row-new: #1a3a1a;
+  --th-bg: #161b22;
   --th-color: #8b949e;
   --scroll-track:#0d1117;
   --scroll-thumb:#30363d;
-  --sb-text:  #8b949e;
-  --cb-bg:    #111827;
+  --sb-text: #8b949e;
+  --cb-bg: #111827;
   --stats-bg: #111827;
-  --grep-bg:  #0d2137;
+  --grep-bg: #0d2137;
   --grep-border:#1565c0;
   --grep-text:#90caf9;
   --cap-color:#ffb74d;
@@ -330,7 +331,7 @@ print <<'HTMLBLOCK';
 #uhmod *{box-sizing:border-box}
 #uhmod{font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;height:calc(100vh - 120px);min-height:500px;background:var(--bg)}
 
-/* ── Toolbar (always dark) ──────────────────────────────────── */
+/* -- Toolbar (always dark) ------------------------------------ */
 .uh-toolbar{background:#1e2a35;padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-shrink:0;border-bottom:3px solid #3498db;border-radius:6px 6px 0 0}
 .uh-toolbar .title{font-size:13px;font-weight:700;color:#fff;display:flex;align-items:center;gap:6px;white-space:nowrap}
 .uh-toolbar .title .icon{background:rgba(255,255,255,.1);border-radius:5px;padding:3px 6px;font-size:12px}
@@ -356,12 +357,12 @@ print <<'HTMLBLOCK';
 .uh-live.paused .dot{background:#ef9a9a;animation:none}
 @keyframes uhD{0%,100%{opacity:1}50%{opacity:.25}}
 
-/* ── Grep banner ────────────────────────────────────────────── */
+/* -- Grep banner ---------------------------------------------- */
 .uh-grepbar{background:var(--grep-bg);border-bottom:2px solid var(--grep-border);padding:5px 14px;font-size:11px;color:var(--grep-text);display:none;align-items:center;gap:8px;flex-shrink:0}
 .uh-grepbar b{color:var(--grep-text)}
 .uh-grepbar .cg{margin-left:auto;cursor:pointer;font-size:13px;color:var(--grep-text);background:none;border:none;font-weight:700}
 
-/* ── Stats bar ──────────────────────────────────────────────── */
+/* -- Stats bar ------------------------------------------------ */
 .uh-stats{background:var(--stats-bg);padding:5px 14px;display:flex;gap:14px;align-items:center;font-size:10px;color:var(--sb-text);flex-shrink:0;flex-wrap:wrap;border-bottom:1px solid var(--border)}
 .uh-stats b{color:var(--text2)}
 .uh-stats .sd{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:3px;vertical-align:middle}
@@ -371,7 +372,7 @@ print <<'HTMLBLOCK';
 .uh-stats .st{color:var(--st-color);font-weight:700}
 .uh-stats .lp{color:var(--text3);margin-left:auto;font-size:10px}
 
-/* ── Cycle pills bar ────────────────────────────────────────── */
+/* -- Cycle pills bar ------------------------------------------ */
 .uh-cbar{background:var(--cb-bg);padding:5px 14px;display:flex;gap:6px;align-items:center;font-size:11px;flex-shrink:0;flex-wrap:wrap;border-bottom:1px solid var(--border)}
 .uh-cbar:empty{display:none;padding:0}
 .uh-cp{padding:3px 10px;border-radius:12px;font-weight:600;font-size:11px}
@@ -384,7 +385,7 @@ print <<'HTMLBLOCK';
 #uhmod.dark .uh-cp-i{background:#1a2a3a;color:#90caf9;border-color:#1565c0}
 #uhmod.dark .uh-cp-d{background:#1a1d2e;color:#8b949e;border-color:#30363d}
 
-/* ── Table ──────────────────────────────────────────────────── */
+/* -- Table ---------------------------------------------------- */
 .uh-tw{flex:1;overflow:auto;background:var(--bg);border-radius:0 0 6px 6px}
 .uh-tw table{width:100%;border-collapse:collapse;font-size:12.5px}
 .uh-tw thead{position:sticky;top:0;z-index:5}
@@ -396,7 +397,7 @@ print <<'HTMLBLOCK';
 .uh-tw td{padding:7px 12px;white-space:nowrap;color:var(--text)}
 .uh-tw td.cm{white-space:normal;word-break:break-all;max-width:700px;color:var(--msg-color)}
 
-/* ── Cell styles ────────────────────────────────────────────── */
+/* -- Cell styles ---------------------------------------------- */
 .ct{color:var(--ts-color);font-size:11px;font-family:'Consolas','Liberation Mono',monospace}
 
 /* Level badges */
@@ -416,7 +417,7 @@ print <<'HTMLBLOCK';
 .kw{color:var(--kw-color);font-weight:600}
 .uh-empty{text-align:center;padding:50px 20px;color:var(--text3);background:var(--bg)}
 
-/* ── New rows banner ────────────────────────────────────────── */
+/* -- New rows banner ------------------------------------------ */
 .uh-nb{position:fixed;bottom:14px;right:14px;background:#28a745;color:#fff;padding:7px 14px;border-radius:7px;font-size:11px;font-weight:600;box-shadow:0 2px 12px rgba(0,0,0,.2);cursor:pointer;display:none;z-index:100;border:1px solid #218838}
 .uh-nb:hover{background:#218838}
 .uh-sp{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:uhSp .6s linear infinite;vertical-align:middle}
@@ -441,14 +442,14 @@ print <<'HTMLBLOCK';
   <button class="uh-btn-dm" id="uhDM" onclick="uhTDM()" title="Toggle dark mode">&#9790;</button>
   <div class="uh-live" id="uhLB" onclick="uhTL()" title="Click to pause/resume"><span class="dot pulse" id="uhDt"></span><span id="uhLL">LIVE</span></div>
 </div>
-<div class="uh-grepbar" id="uhGB">Full-log search: <b id="uhGT"></b> — <span id="uhGC">0</span> results <button class="cg" onclick="uhCG()">&#10005; Back to live</button></div>
+<div class="uh-grepbar" id="uhGB">Full-log search: <b id="uhGT"></b> -- <span id="uhGC">0</span> results <button class="cg" onclick="uhCG()">&#10005; Back to live</button></div>
 <div class="uh-stats">
-  <span><span class="sd" id="uhSD"></span><span id="uhSL">…</span></span>
-  <span style="color:#37474f">│</span>
+  <span><span class="sd" id="uhSD"></span><span id="uhSL">...</span></span>
+  <span style="color:#37474f">|</span>
   Showing <b id="uhSh">0</b> of <b id="uhTo">0</b>
   <span id="uhCN" class="cap" style="display:none"> (max 1000)</span>
-  <span style="color:#37474f">│</span>
-  <span class="st" id="uhST">—</span>
+  <span style="color:#37474f">|</span>
+  <span class="st" id="uhST">--</span>
   <span class="lp">/var/log/uhotspot.log</span>
 </div>
 <div class="uh-cbar" id="uhCB"></div>
@@ -456,7 +457,7 @@ print <<'HTMLBLOCK';
   <table><thead><tr><th style="width:145px">Timestamp</th><th style="width:70px">Level</th><th>Message</th></tr></thead><tbody id="uhTB"></tbody></table>
   <div id="uhEM" class="uh-empty" style="display:none">No log entries match</div>
 </div>
-<div class="uh-nb" id="uhNB" onclick="uhJT()">^ <span id="uhNC">0</span> new rows — click to view</div>
+<div class="uh-nb" id="uhNB" onclick="uhJT()">^ <span id="uhNC">0</span> new rows -- click to view</div>
 </div>
 
 <script>
@@ -515,7 +516,7 @@ function ucs(){
 
 window.uhRL=function(){
   if(loading)return;uhCG(true);loading=true;cP();ALL=[];CUR=[];fOff=0;nrc=0;
-  document.getElementById('uhTB').innerHTML='<tr><td colspan="3" style="text-align:center;padding:40px;color:#90a4ae">Loading…</td></tr>';
+  document.getElementById('uhTB').innerHTML='<tr><td colspan="3" style="text-align:center;padding:40px;color:#90a4ae">Loading...</td></tr>';
   var ln=document.getElementById('uhLn').value;
   fetch('api.cgi?action=tail&pos=0&lines='+ln).then(function(r){return r.json()}).then(function(d){
     if(d.error){loading=false;return}ALL=bi(d.rows||[]).reverse();fOff=d.pos||0;uhAF();ucs();loading=false;if(live)sP();
@@ -547,8 +548,8 @@ window.uhTG=function(){if(grep)uhCG(false);else uhGS()};
 window.uhGS=function(){
   var q=document.getElementById('uhQ').value.trim();if(!q){uhRL();return}
   if(loading)return;loading=true;cP();ALL=[];CUR=[];nrc=0;grep=true;
-  var btn=document.getElementById('uhBG');btn.innerHTML='<span class="uh-sp"></span> Searching…';
-  document.getElementById('uhTB').innerHTML='<tr><td colspan="3" style="text-align:center;padding:40px;color:#90a4ae">Searching entire log…</td></tr>';
+  var btn=document.getElementById('uhBG');btn.innerHTML='<span class="uh-sp"></span> Searching...';
+  document.getElementById('uhTB').innerHTML='<tr><td colspan="3" style="text-align:center;padding:40px;color:#90a4ae">Searching entire log...</td></tr>';
   fetch('api.cgi?action=grep&q='+encodeURIComponent(q)).then(function(r){return r.json()}).then(function(d){
     if(d.error){loading=false;rgB();return}ALL=bi(d.rows||[]).reverse();fOff=d.offset||0;
     document.getElementById('uhGT').textContent=q;document.getElementById('uhGC').textContent=ALL.length;
@@ -564,7 +565,7 @@ window.uhTDM=uhTDM;
 function pS(){
   fetch('api.cgi?action=status').then(function(r){return r.json()}).then(function(d){
     var dt=document.getElementById('uhSD'),lb=document.getElementById('uhSL');
-    if(d.active){dt.className='sd on';lb.innerHTML='PID '+d.pid+(d.uptime?' · '+d.uptime:'')+(d.mem?' · '+d.mem:'')}
+    if(d.active){dt.className='sd on';lb.innerHTML='PID '+d.pid+(d.uptime?' . '+d.uptime:'')+(d.mem?' . '+d.mem:'')}
     else{dt.className='sd off';lb.textContent='stopped'}
   }).catch(function(){});
 }
@@ -613,11 +614,11 @@ EOF
 
     cat > "$MODDIR/lang/es" <<'EOF'
 index_title=Visor de Log del Hotspot UniFi
-index=Índice de Webmin
+index=Indice de Webmin
 EOF
 
     # ============================================================
-    # 5. Icon (base64) — UH (UniFi Hotspot) 48x48
+    # 5. Icon (base64) -- UH (UniFi Hotspot) 48x48
     # ============================================================
     base64 -d > "$MODDIR/images/icon.gif" 2>/dev/null << 'ICONEOF' || true
 R0lGODdhMAAwAIUAAP////v8/vv8/fj6/Ovw9+rv9uPq8+Hn8tfh78LR5rnK4rTH4LLF37DD3qO62aO52aG42IKhy32dyXiZx3eZx3SWxW6Sw22QwmOJvmCHvT5trzpqrTNlqjJkqi5hqCpepyBXox1UoRxToRpSoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACwAAAAAMAAwAEAI+QBHCBxIsKDBgwgTKlzIsGFDDQAiPiB4ISIACgIhSix4IGIBhwQ1Apg4sGJEjCNEkhzYEcBHkDBjypxJs6bNmzgdqqRoEeVOgi1fxoxgEQKHDxMCRFQw8CdLjzmjSp1KtarVq1izLnQ6wuTFjBZXCgwqk6tXnxbTqhUK8oNFBgQlWMQAdiNQqDQzLDAwQACBBBNAhAzLEa/Ww4gTK17MuLHjx5AjS568lXDJnnVHFnZZ1rLAs5nFjiAb0yzmlJ7HGgZp+mRmtWnZOtxg0QFBCxYrhN4s22FLAyIGNrDYYfddzjJDMIAdEYGHpqlHr6ZMvbr169iza5cZEAA7
@@ -665,7 +666,7 @@ EOF
     if [[ -f /etc/webmin/webmin.acl ]] && ! grep -q "$MODNAME" /etc/webmin/webmin.acl; then
         sed -i.bak "s/\\(^root:.*\\)/\\1 $MODNAME/" /etc/webmin/webmin.acl
         rm -f /etc/webmin/webmin.acl.bak
-        echo "✓ Module added to webmin.acl"
+        echo "Module added to webmin.acl"
     fi
 
     rm -f /var/webmin/module.infos.cache
@@ -675,7 +676,7 @@ EOF
 
     echo ""
     echo "=========================================="
-    echo "✓ UniFi Hotspot Log Viewer installed!"
+    echo "UniFi Hotspot Log Viewer installed!"
     echo "=========================================="
     echo ""
     echo "Module location: $MODDIR"
@@ -694,18 +695,18 @@ uninstall_module() {
     echo ""
 
     if [ ! -d "$MODDIR" ]; then
-        echo "⚠  Module is not installed."
+        echo "Module is not installed."
         return 1
     fi
 
     rm -rf "$MODDIR"
     rm -rf "$ETCDIR"
-    echo "✓ Module directories removed"
+    echo "Module directories removed"
 
     if [[ -f /etc/webmin/webmin.acl ]] && grep -q "$MODNAME" /etc/webmin/webmin.acl; then
         sed -i.bak "s/ $MODNAME//g" /etc/webmin/webmin.acl
         rm -f /etc/webmin/webmin.acl.bak
-        echo "✓ Module removed from webmin.acl"
+        echo "Module removed from webmin.acl"
     fi
 
     rm -f /var/webmin/module.infos.cache
@@ -713,7 +714,7 @@ uninstall_module() {
 
     echo ""
     echo "=========================================="
-    echo "✓ Module uninstalled"
+    echo "Module uninstalled"
     echo "=========================================="
     echo ""
 }
@@ -721,13 +722,13 @@ uninstall_module() {
 show_menu() {
     clear
     echo "============================================================"
-    echo "      UNIFI HOTSPOT LOG VIEWER - WEBMIN MODULE"
-    echo "              Installation Menu"
+    echo "UNIFI HOTSPOT LOG VIEWER - WEBMIN MODULE"
+    echo "Installation Menu"
     echo "============================================================"
     echo ""
-    echo "  1) Install module"
-    echo "  2) Uninstall module"
-    echo "  3) Exit"
+    echo "1) Install module"
+    echo "2) Uninstall module"
+    echo "3) Exit"
     echo ""
     echo -n "Select an option [1-3]: "
 }
@@ -736,9 +737,9 @@ show_usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  install      Install the module"
-    echo "  uninstall    Uninstall the module"
-    echo "  -h, --help   Show this help message"
+    echo "install Install the module"
+    echo "uninstall Uninstall the module"
+    echo "-h, --help Show this help message"
     echo ""
 }
 
@@ -750,10 +751,10 @@ main() {
 
     if [ $# -gt 0 ]; then
         case "$1" in
-            install)    install_module; exit 0 ;;
-            uninstall)  uninstall_module; exit 0 ;;
-            -h|--help)  show_usage; exit 0 ;;
-            *)          echo "Error: Invalid option '$1'"; show_usage; exit 1 ;;
+            install) install_module; exit 0 ;;
+            uninstall) uninstall_module; exit 0 ;;
+            -h|--help) show_usage; exit 0 ;;
+            *) echo "Error: Invalid option '$1'"; show_usage; exit 1 ;;
         esac
     fi
 
