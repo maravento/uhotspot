@@ -242,7 +242,29 @@ if [[ "$_owner" != "root" ]] || [[ "$_gdigit" != "0" ]] || [[ "$_odigit" != "0" 
     log "ERROR: $CONFIG_FILE has unsafe owner/permissions (owner=$_owner perms=$_perms) -- must be owned by root with no group/other access (600)"
     exit 1
 fi
-source "$CONFIG_FILE"
+# Load only known KEY=VALUE pairs instead of sourcing, so a tampered or
+# maliciously replaced config file cannot execute code -- same approach as
+# uleases.sh's load_env_file().
+load_env_file() {
+    local file="$1" line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+            value="${value:1:$((${#value}-2))}"
+        fi
+        case "$key" in
+            NTFY_TOPIC|API_FAIL_THRESHOLD|STARTUP_GRACE_SECONDS|POLL_INTERVAL)
+                printf -v "$key" '%s' "$value"
+                ;;
+            *)
+                ;;
+        esac
+    done < "$file"
+}
+load_env_file "$CONFIG_FILE"
 
 if [[ -z "${NTFY_TOPIC:-}" ]]; then
     log "ERROR: NTFY_TOPIC not set in $CONFIG_FILE -- aborting"

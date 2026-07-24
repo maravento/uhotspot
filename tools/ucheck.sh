@@ -414,7 +414,7 @@ menu_search() {
 
 # Loads the UNIFI_* variables from uhotspot.conf, but only if the file is
 # owned by root and has no write permission for group/other (the same
-# validation performed by uhotspotd.sh before its own "source"). Returns 1
+# validation uhotspotd.sh performs before loading its own config). Returns 1
 # without loading anything if the validation fails, instead of continuing
 # with potentially compromised credentials.
 load_unifi_config() {
@@ -434,8 +434,26 @@ load_unifi_config() {
         return 1
     fi
 
-    # shellcheck source=/dev/null
-    source "$HOTSPOT_CONF"
+    # Load only known KEY=VALUE pairs instead of sourcing, so a tampered or
+    # maliciously replaced config file cannot execute code -- same approach
+    # as uleases.sh's load_env_file().
+    local _line _key _value
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        [[ "$_line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$_line" =~ ^[[:space:]]*$ ]] && continue
+        _key="${_line%%=*}"
+        _value="${_line#*=}"
+        if [[ "$_value" == \"*\" && "$_value" == *\" && ${#_value} -ge 2 ]]; then
+            _value="${_value:1:$((${#_value}-2))}"
+        fi
+        case "$_key" in
+            UNIFI_CONTROLLER_URL|UNIFI_USERNAME|UNIFI_PASSWORD|UNIFI_TYPE|UNIFI_SITE|HOTSPOT_ESSID)
+                printf -v "$_key" '%s' "$_value"
+                ;;
+            *)
+                ;;
+        esac
+    done < "$HOTSPOT_CONF"
 
     local missing=()
     [[ -z "${UNIFI_CONTROLLER_URL:-}" ]] && missing+=("UNIFI_CONTROLLER_URL")

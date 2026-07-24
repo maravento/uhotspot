@@ -462,6 +462,48 @@ function clean_grace_list() {
     rm -f "$file_temp" "$patterns"
 }
 
+# umacbak.txt lives in the same directory as umacauth.txt and shares the
+# "umac" name prefix, but has a different composition: one bare MAC per
+# line, not the "a;MAC;IP;HOSTNAME;END;" format of umacauth.txt/mac-*.txt.
+# So this can't reuse the field-based matching clean_hotspot_list/
+# clean_grace_list use -- it matches by MAC value directly (whole-line,
+# case-insensitive) and removes the line, logging what was removed.
+function clean_umacbak_list() {
+    local wellknow_file="${HOTSPOT_PATH}/acl/umacbak.txt"
+    [ ! -f "$wellknow_file" ] && return
+    local patterns
+    patterns=$(mktemp)
+    TEMP_FILES_TO_CLEAN+=("${patterns}")
+    grep -h '^a;' "$ACL_MAC_PATH"/mac-* 2>/dev/null | awk -F';' '{print tolower($2)}' | sort -u > "$patterns"
+
+    local removed=0
+    while IFS= read -r mac_actual; do
+        [ -z "$mac_actual" ] && continue
+        if grep -qxiF "$mac_actual" "$wellknow_file" 2>/dev/null; then
+            log "INFO: duplicate MAC '$mac_actual' -- removed from $(basename "$wellknow_file") (present in mac-*.txt)"
+            (( removed++ )) || true
+        fi
+    done < "$patterns"
+
+    if (( removed > 0 )); then
+        local file_temp _grep_rc=0
+        file_temp=$(mktemp)
+        TEMP_FILES_TO_CLEAN+=("${file_temp}")
+        grep -vixFf "$patterns" "$wellknow_file" > "$file_temp" || _grep_rc=$?
+        if (( _grep_rc > 1 )); then
+            log "ERROR: clean_umacbak_list: grep failed (rc=$_grep_rc) -- skipping update of umacbak"
+            rm -f "$file_temp"
+        else
+            chmod 600 "$file_temp"
+            mv "$file_temp" "$wellknow_file"
+        fi
+    fi
+    rm -f "$patterns"
+    if (( removed > 0 )); then
+        log "clean_umacbak_list: done (removed=$removed)"
+    fi
+}
+
 function expire_grace_entries() {
     [ ! -f "$ACL_GRACE_FILE" ] && return
     local file_temp now_epoch age
@@ -514,9 +556,11 @@ function is_pydhcp() {
     function read_leases() {
         # grep returns exit 1 on no-match, which is legitimate here and must
         # not abort the script. Disable pipefail for the duration of this
-        # function and restore it on return.
-        local _saved_opts
-        _saved_opts=$(set +o | grep pipefail)
+        # function and restore it on return -- restore only if it was
+        # actually on before (a plain "set -o pipefail" would wrongly
+        # re-enable it for a caller that had it off).
+        local _pipefail_was_on=0
+        [[ "$(set +o | grep -c 'set -o pipefail')" == "1" ]] && _pipefail_was_on=1
         set +o pipefail
 
         local temp_leases
@@ -620,7 +664,7 @@ function is_pydhcp() {
         chmod 640 "$dhcpd"
 
         # Restore pipefail to whatever it was before entering this function.
-        eval "$_saved_opts"
+        (( _pipefail_was_on )) && set -o pipefail
     }
 
     function update_dhcp_conf {
@@ -823,6 +867,7 @@ class "blockdhcp" {
     clean_proxy_list
     if [[ "${UNIFI_HOTSPOT_ENABLED:-true}" == "true" ]]; then
         clean_hotspot_list
+        clean_umacbak_list
     fi
     log "Stopping pydhcpd"
     trap 'rm -f "${TEMP_FILES_TO_CLEAN[@]}" 2>/dev/null; systemctl reset-failed pydhcpd 2>/dev/null; systemctl is-active --quiet pydhcpd || systemctl start pydhcpd' EXIT
@@ -929,9 +974,38 @@ function check_acl_conflicts() {
             while IFS= read -r dup; do
                 [[ -z "$dup" ]] && continue
                 locations=$(grep -lF ";${dup};" "${sources[@]}" 2>/dev/null | tr '\n' ' ')
+
+                if [[ "$field" == "2" ]]; then
+                    # A MAC duplicated between exactly one mac-*.txt file and
+                    # umacauth.txt is not a misconfiguration -- mac-*.txt
+                    # always wins (see uhotspotd.sh's MANAGED MACS note) and
+                    # umacauth.txt's copy is a stale/residual entry. Resolve
+                    # it here instead of aborting, generalizing what
+                    # clean_hotspot_list already does for mac-unlimited
+                    # specifically to any mac-*.txt file. A MAC duplicated
+                    # between two or more mac-*.txt files still aborts below
+                    # -- that is a genuine misconfiguration, not this case.
+                    local mac_txt_hits=0 hotspot_hit=0 _loc
+                    for _loc in $locations; do
+                        if [[ "$_loc" == "$ACL_MAC_HOTSPOT" ]]; then
+                            hotspot_hit=1
+                        else
+                            (( mac_txt_hits++ )) || true
+                        fi
+                    done
+                    if (( mac_txt_hits == 1 && hotspot_hit == 1 )); then
+                        if sed -i "/^a;${dup};/Id" "$ACL_MAC_HOTSPOT"; then
+                            log "INFO: duplicate MAC '$dup' -- removed from $(basename "$ACL_MAC_HOTSPOT") (present in mac-*.txt)"
+                            continue
+                        else
+                            log "ERROR: check_acl_conflicts: failed to auto-resolve duplicate MAC '$dup' -- aborting"
+                        fi
+                    fi
+                fi
+
                 log "ERROR: duplicate $field_name '$dup' in: $locations"
+                has_error=1
             done <<< "$dups"
-            has_error=1
         fi
     done
 

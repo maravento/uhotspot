@@ -39,7 +39,6 @@
 # DEPENDENCIES : curl, jq
 # CONFIG : /etc/uhotspot/uhotspot.conf
 # LOG : /var/log/uaudit.log
-# TESTED ON : Ubuntu 24.04 - UniFi OS Network 10.x
 #
 # NOTE on logging:
 # - Manual/interactive script, not a daemon: /var/log/uaudit.log is truncated

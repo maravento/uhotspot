@@ -507,7 +507,8 @@ run_setup_wizard() {
     step "Managed MAC lists (optional)"
     echo "mac-*.txt files allow specific devices to bypass the captive portal"
     echo "automatically (corporate laptops, APs, printers, switches, etc.)."
-    echo "The daemon authorizes those MACs in UniFi each cycle if present."
+    echo "They bypass entirely at the DHCP level (uleases.sh) -- the daemon"
+    echo "itself never authorizes them in UniFi."
     echo "Files are stored in /etc/acl/acl_mac/ and managed manually."
     mkdir -p /etc/acl/acl_mac /etc/acl/acl_dhcp /etc/acl/acl_ipt
     chmod 700 /etc/acl/acl_mac /etc/acl/acl_dhcp /etc/acl/acl_ipt
@@ -850,7 +851,12 @@ do_update() {
         systemctl stop ualert && info "ualert stopped for update" || warn "Could not stop ualert -- continuing anyway"
     fi
     if (( _uwatch_was_active )); then
-        crontab -l 2>/dev/null | awk -v p="$uwatch_path" '(index($0,p)>0 && substr($0,1,1)!="#"){print "#" $0; next} {print}' | crontab -
+        # Tagged with a distinctive marker (not a bare "#") so Resume below
+        # restores only the line this run paused -- never an unrelated
+        # uwatch line the administrator had already commented out on purpose
+        # (e.g. a disabled alternate schedule left in the crontab).
+        crontab -l 2>/dev/null | awk -v p="$uwatch_path" -v m="#uhotspot-paused#" \
+            '(index($0,p)>0 && substr($0,1,1)!="#"){print m $0; next} {print}' | crontab -
         info "uwatch cron entry commented out for update"
     fi
 
@@ -889,7 +895,11 @@ do_update() {
         systemctl start ualert && info "ualert restarted" || warn "Could not restart ualert -- check: systemctl status ualert"
     fi
     if (( _uwatch_was_active )); then
-        crontab -l 2>/dev/null | awk -v p="$uwatch_path" '(substr($0,1,1)=="#" && index($0,p)>0){print substr($0,2); next} {print}' | crontab -
+        # Only strips the "#uhotspot-paused#" marker this run's Pause step
+        # added above -- never touches a plain "#"-commented line, so a
+        # schedule the administrator disabled on purpose stays disabled.
+        crontab -l 2>/dev/null | awk -v p="$uwatch_path" -v m="#uhotspot-paused#" \
+            '(index($0,m)==1 && index($0,p)>0){print substr($0, length(m)+1); next} {print}' | crontab -
         info "uwatch cron entry restored"
     fi
 

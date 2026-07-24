@@ -32,44 +32,55 @@
 # successful login. Re-authentication during normal operation (session
 # expired mid-cycle) is unaffected and still alerts immediately on failure.
 #
-# MANAGED MACS (optional):
-# If /etc/acl/acl_mac/mac-*.txt files exist, MACs listed there are treated
-# as managed corporate devices. They are silently excluded from the guest
-# portal flow (steps 5, 7, 8, 9) and are kept authorized in UniFi (step 10)
-# so they bypass the captive portal on HOTSPOT_ESSID without needing a
-# voucher. If no mac-*.txt files exist, steps 5 and 10 are no-ops.
+# MANAGED MACS (mac-*.txt):
+# uhotspotd.sh never authorizes mac-*.txt devices as a UniFi "guest" and never
+# maintains its own snapshot/cache of them. Those devices bypass the captive
+# portal entirely at the DHCP/pydhcpd level (fixed-address host entries, or --
+# if their line is commented out -- the same "blockdhcp" deny class as
+# blockdhcp.txt), handled exclusively by uleases.sh on every reload.
+# uhotspotd.sh's own responsibility is limited to the lists under
+# /etc/uhotspot/acl (umacauth.txt, ugrace.txt, umacbak.txt, uqueue.txt) plus
+# blockdhcp.txt dedup.
+#
+# Two narrow, deliberate exceptions touch mac-*.txt directly, neither of them
+# a numbered cycle step and neither caching state across cycles beyond their
+# own bookkeeping:
+# - check_mac_lists_changed: a pure file hash (no MAC/status parsing) to
+#   notice a change and get uleases.sh invoked promptly instead of waiting
+#   for the safety-net reload.
+# - is_managed_mac: a live, on-disk membership check (active or commented)
+#   used only as a guard in process_sessions/kick_newly_authorized, so a
+#   stale or externally-granted UniFi guest authorization for a managed
+#   device can never be promoted into umacauth.txt.
 #
 # CYCLE (every POLL_INTERVAL seconds, default 20, set in uhotspot.conf):
 # 1. VOUCHERS -- load voucher cache from UniFi (stat/voucher)
 # 2. SNAPSHOT -- md5sum baseline of ACL files before processing (taken
 # before DEDUP so its blockdhcp.txt changes are detected
-# by RELOAD, step 12)
+# by RELOAD, step 10)
 # 3. DEDUP -- cross-list consistency check, blockdhcp cleanup
 # 4. SORT -- sort umacauth.txt by IP
-# 5. CLEAN MACS -- remove mac-*.txt entries from umacauth
-# 6. EXPIRED -- remove expired umacauth entries (hotspot IPs freed)
-# 7. NEW LEASES -- scan pydhcpd.leases; any MAC not yet in umacauth/
-# mac-*/blockdhcp/ugrace/umacbak is written
+# 5. EXPIRED -- remove expired umacauth entries (hotspot IPs freed)
+# 6. NEW LEASES -- scan pydhcpd.leases; any MAC not yet in umacauth/
+# blockdhcp/ugrace/umacbak is written
 # directly into ugrace.txt with a first-seen timestamp.
 # No fixed hotspot-range IP is assigned and no lease
 # removal is queued: grace clients keep their existing
 # pydhcpd pool lease. Writing ugrace.txt is enough to
-# trigger RELOAD (step 12), which invokes uleases.sh to
+# trigger RELOAD (step 10), which invokes uleases.sh to
 # do the actual classification/expiry/blocking of grace
-# entries.
-# 8. SESSIONS -- promote voucher-authenticated clients to umacauth
-# 9. REVOKE -- remove UniFi-unauthorized clients from umacauth
-# 10. AUTHORIZE -- re-authorize managed MACs (mac-*.txt) seen on HOTSPOT_ESSID
-# that UniFi reports as unauthorized; checked every cycle so
-# reconnecting devices are covered automatically
-# 11. BACKUP -- update umacbak.txt, clean blockdhcp conflicts
-# 12. RELOAD -- invoke SERVER_RELOAD_SCRIPT if ACLs changed, or once per
+# entries -- including reconciling any mac-*.txt device
+# that transiently showed up here.
+# 7. SESSIONS -- promote voucher-authenticated clients to umacauth
+# 8. REVOKE -- remove UniFi-unauthorized clients from umacauth
+# 9. BACKUP -- update umacbak.txt, clean blockdhcp conflicts
+# 10. RELOAD -- invoke SERVER_RELOAD_SCRIPT if ACLs changed, or once per
 # RELOAD_SAFETY_INTERVAL_SECONDS regardless (safety net for
 # idle networks -- grace->block promotion, firewall self-heal)
-# 13. KICK -- force reassociation of newly-authorized clients still
+# 11. KICK -- force reassociation of newly-authorized clients still
 # connected, so they pick up their new fixed IP right away
 #
-# stat/sta is queried once per cycle and shared across steps 9, 10, 13.
+# stat/sta is queried once per cycle and shared across steps 8 and 11.
 #
 # CONFIG: /etc/uhotspot/uhotspot.conf
 # LOG: /var/log/uhotspot.log
@@ -167,27 +178,24 @@ trap cleanup_temp EXIT
 # -- Paths & constants ---------------------------------------------------------
 HOTSPOT_PATH="/etc/uhotspot"
 CONFIG_FILE="$HOTSPOT_PATH/uhotspot.conf"
-ACL_MAC_PATH="/etc/acl/acl_mac"
 MAC_LIST="$HOTSPOT_PATH/acl/umacauth.txt"
 BLOCK_DHCP="/etc/acl/acl_dhcp/blockdhcp.txt"
 LEASE_REMOVE_QUEUE="$HOTSPOT_PATH/acl/uqueue.txt"
 PYDHCPD_LEASES="/etc/pydhcp/pydhcpd.leases"
+# Read only by check_mac_lists_changed() (see below) for pure change
+# detection (file hashes) -- never opened/parsed for MAC content elsewhere
+# in this script; that stays exclusively uleases.sh's responsibility.
+ACL_MAC_PATH="/etc/acl/acl_mac"
 
 TOKEN_STATE_FILE="/run/uhotspotd_session"
-
-# Minutes UniFi keeps a managed MAC (mac-*.txt) authorized on the guest portal.
-# Re-sent periodically by authorize_managed_macs (step 10) well before expiry.
-MANAGED_AUTHORIZE_MINUTES=527040 # 366 days
 
 # -- Runtime state -------------------------------------------------------------
 SESSION_TOKEN=""
 CSRF_TOKEN=""
-MANAGED_MACS=""
 VOUCHER_CACHE=""
 VOUCHER_COUNT=0
 SESSIONS_AUTHORIZED=0
 REVOKED=0
-MANAGED_AUTHORIZED=0
 NEWLY_AUTHORIZED_MACS=()
 # Backend readiness tracking: the login endpoint can answer well before the
 # UniFi Network application's data endpoints (stat/voucher, stat/guest,
@@ -204,6 +212,11 @@ _ACL_SNAPSHOT_BLOCK=""
 _ACL_SNAPSHOT_QUEUE=""
 _ACL_SNAPSHOT_GRACE=""
 _RELOAD_OK=0
+# mac-*.txt change watcher (see check_mac_lists_changed): independent of the
+# ACL snapshot/reload mechanism above -- its own baseline and its own pending
+# flag, never reusing uqueue.txt or the _ACL_SNAPSHOT_* machinery.
+_MAC_LISTS_HASH_PREV=""
+_MAC_RELOAD_PENDING=0
 # Safety-net reload: forces SERVER_RELOAD_SCRIPT even without an ACL diff,
 # on this cadence, so idle networks still get grace->block promotion and the
 # firewall self-heals without depending on an external cron entry (see
@@ -211,6 +224,32 @@ _RELOAD_OK=0
 # POLL_INTERVAL; overridable via RELOAD_SAFETY_INTERVAL_SECONDS in
 # uhotspot.conf.
 _LAST_RELOAD_EPOCH=0
+
+# Loads only known KEY=VALUE pairs from CONFIG_FILE instead of sourcing it,
+# so a tampered or maliciously replaced config file cannot execute code --
+# same approach as uleases.sh's load_env_file().
+load_env_file() {
+    local file="$1" line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+            value="${value:1:$((${#value}-2))}"
+        fi
+        case "$key" in
+            UNIFI_CONTROLLER_URL|UNIFI_USERNAME|UNIFI_PASSWORD|UNIFI_TYPE|UNIFI_SITE|\
+            HOTSPOT_ESSID|HOTSPOT_IP_RANGE|HOTSPOT_RANGE_START|HOTSPOT_RANGE_END|\
+            SERVER_RELOAD_SCRIPT|ACL_GRACE_FILE|POLL_INTERVAL|STARTUP_GRACE_SECONDS|\
+            RELOAD_SAFETY_INTERVAL_SECONDS)
+                printf -v "$key" '%s' "$value"
+                ;;
+            *)
+                ;;
+        esac
+    done < "$file"
+}
 
 # -- Config --------------------------------------------------------------------
 load_config() {
@@ -227,8 +266,7 @@ load_config() {
         echo "ERROR: $CONFIG_FILE has unsafe owner/permissions (owner=$_owner perms=$_perms) -- must be owned by root with no group/other access (600)" >&2
         exit 1
     fi
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
+    load_env_file "$CONFIG_FILE"
 
     local missing=()
     [[ -z "${UNIFI_CONTROLLER_URL:-}" ]] && missing+=("UNIFI_CONTROLLER_URL")
@@ -249,6 +287,13 @@ load_config() {
 
     if [[ "${UNIFI_TYPE:-}" != "unifi-os" && "${UNIFI_TYPE:-}" != "classic" ]]; then
         log "ERROR: UNIFI_TYPE must be 'unifi-os' or 'classic', got: ${UNIFI_TYPE:-unset}"
+        exit 1
+    fi
+
+    # UNIFI_SITE is interpolated directly into API URLs (api_path()) -- reject
+    # anything outside the character set UniFi itself uses for site names.
+    if [[ ! "$UNIFI_SITE" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        log "ERROR: UNIFI_SITE contains invalid characters: $UNIFI_SITE"
         exit 1
     fi
 }
@@ -427,7 +472,7 @@ unifi_login() {
 
     CSRF_TOKEN="$new_csrf"
     _save_session
-    log "INFO: UniFi login OK (csrf=${CSRF_TOKEN:0:8}...)"
+    log "INFO: UniFi login OK"
 }
 
 api_get() {
@@ -557,11 +602,19 @@ get_next_guest_number() {
 # NOTE: called inside $() subshells -- no log(), no side effects.
 # Returns "IP;hostname" via stdout only.
 assign_ip_and_hostname() {
+    # Used IPs are collected once into a lookup table instead of one grep per
+    # candidate IP -- O(range size) instead of O(range size * MAC_LIST size).
+    local -A used_ips=()
+    local ip
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] && used_ips["$ip"]=1
+    done < <(awk -F';' '{print $3}' "$MAC_LIST" 2>/dev/null)
+
     local available=()
     local i
     for (( i=HOTSPOT_RANGE_START; i<=HOTSPOT_RANGE_END; i++ )); do
         local candidate="${HOTSPOT_IP_RANGE}.${i}"
-        grep -q ";${candidate};" "$MAC_LIST" 2>/dev/null && continue
+        [[ -n "${used_ips[$candidate]+x}" ]] && continue
         available+=("$candidate")
     done
     if [[ ${#available[@]} -eq 0 ]]; then
@@ -599,28 +652,65 @@ queue_lease_removal() {
     return 1
 }
 
+# -- Independent mechanism: mac-*.txt change watcher ---------------------------
+# NOT one of the numbered cycle steps and NOT part of the ACL snapshot/reload
+# machinery above (_ACL_SNAPSHOT_*, uqueue.txt) -- deliberately separate, per
+# the invariant that uhotspotd.sh never processes mac-*.txt content (only
+# uleases.sh does). This only fingerprints the files (combined md5sum of
+# path+content, so an add/remove/edit of any mac-*.txt all count) to detect
+# that *something* changed, with zero parsing of MACs/status.
+#
+# A change detected this cycle does NOT reload immediately -- it only sets
+# _MAC_RELOAD_PENDING for check_and_reload_if_changed to pick up next cycle,
+# so it never causes a second, separate ureload.sh invocation in the same run
+# as one already triggered by the umacauth/blockdhcp/queue/ugrace diff.
+check_mac_lists_changed() {
+    local cur_hash
+    shopt -s nullglob
+    local mac_files=("$ACL_MAC_PATH"/mac-*.txt)
+    shopt -u nullglob
+    if (( ${#mac_files[@]} > 0 )); then
+        cur_hash=$(md5sum "${mac_files[@]}" 2>/dev/null | sort | md5sum | awk '{print $1}')
+    else
+        cur_hash="none"
+    fi
+
+    if [[ -n "$_MAC_LISTS_HASH_PREV" && "$cur_hash" != "$_MAC_LISTS_HASH_PREV" ]]; then
+        _MAC_RELOAD_PENDING=1
+        log "INFO: mac-*.txt changed -- reload scheduled for next cycle"
+    fi
+    _MAC_LISTS_HASH_PREV="$cur_hash"
+}
+
+# -- Live managed-MAC check (defense-in-depth) ---------------------------------
+# True if $1 is listed in ANY mac-*.txt, active (a;) or deactivated (#a;).
+# Reads fresh from disk on every call -- this is a narrow, deliberate exception
+# to "uhotspotd never processes mac-*.txt content" (see MANAGED MACS note
+# above): a managed device can still show up in stat/guest with a live guest
+# authorization that has nothing to do with this daemon (a residual session
+# from before uhotspotd stopped calling authorize-guest, one granted by hand
+# in UniFi, or a voucher redeemed on that device before it was added to
+# mac-*.txt). That must never be promoted into umacauth.txt regardless of
+# what stat/guest reports -- used by process_sessions (step 7) and, as
+# defense-in-depth, kick_newly_authorized (step 11).
+is_managed_mac() {
+    local m="${1,,}" f
+    [[ -z "$m" ]] && return 1
+    shopt -s nullglob
+    local files=("$ACL_MAC_PATH"/mac-*.txt)
+    shopt -u nullglob
+    for f in "${files[@]}"; do
+        grep -qiE "^#?a;${m};" "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
 # -- Step 3: MAC list deduplication -------------------------------------------
 dedup_mac_lists() {
-    # Populated from whatever mac-*.txt files exist in ACL_MAC_PATH. Stays
-    # empty if none are present, in which case clean_managed_macs and
-    # authorize_managed_macs are no-ops (both check
-    # [[ -z "$MANAGED_MACS" ]] && return at their entry point).
-    MANAGED_MACS=$(
-        {
-            for f in "$ACL_MAC_PATH"/mac-*.txt; do
-                [[ -f "$f" ]] && grep -ih '^a;' "$f" 2>/dev/null || true
-            done
-        } | awk -F';' '{print tolower($2)}' \
-          | grep -E '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' \
-          | sort -u || true
-    )
-
     local all_macs
     all_macs=$(
-        {
-            awk -F';' '/^a;/{print tolower($2)}' "$MAC_LIST" 2>/dev/null || true
-            echo "$MANAGED_MACS"
-        } | grep -E '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' \
+        awk -F';' '/^a;/{print tolower($2)}' "$MAC_LIST" 2>/dev/null \
+          | grep -E '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' \
           | sort -u || true
     )
 
@@ -664,51 +754,6 @@ dedup_mac_lists() {
 
     if (( sanitized_block > 0 )); then
         log "INFO: dedup -> sanitized $sanitized_block blockdhcp entries"
-    fi
-}
-
-# -- Step 5: clean managed MACs from hotspot lists -----------------------------
-# Removes any MAC present in mac-*.txt from umacauth.
-clean_managed_macs() {
-    [[ -z "$MANAGED_MACS" ]] && return
-    local removed=0 tmp
-
-    local list="$MAC_LIST"
-    if [[ -f "$list" ]]; then
-        local before_count=0
-        before_count=$(grep -c '^a;' "$list" 2>/dev/null); before_count=$(( ${before_count:-0} + 0 ))
-        local iter_removed=0
-        tmp=$(mktemp)
-        TEMP_FILES_TO_CLEAN+=("${tmp}")
-        while IFS= read -r _line; do
-            IFS=';' read -r status mac rest <<< "$_line"
-            if [[ "$status" != "a" || -z "$mac" ]]; then
-                echo "$_line" >> "$tmp"
-                continue
-            fi
-            local lc_mac
-            lc_mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
-            if echo "$MANAGED_MACS" | grep -q "^${lc_mac}$"; then
-                log "INFO: clean_managed_macs -> removed $mac from $(basename "$list")"
-                queue_lease_removal "$mac"
-                (( iter_removed++ )) || true
-                (( removed++ )) || true
-            else
-                echo "${status};${mac};${rest}" >> "$tmp"
-            fi
-        done < "$list"
-        local after_count
-        after_count=$(grep -c '^a;' "$tmp" 2>/dev/null); after_count=$(( ${after_count:-0} + 0 ))
-        if (( before_count - after_count != iter_removed )); then
-            log "ERROR: clean_managed_macs: count mismatch on $(basename "$list") (before=$before_count after=$after_count removed=$iter_removed) -- skipping"
-            rm -f "$tmp"
-        else
-            mv "$tmp" "$list" && chmod 600 "$list"
-        fi
-    fi
-
-    if (( removed > 0 )); then
-        log "INFO: clean_managed_macs -> done (removed $removed entries)"
     fi
 }
 
@@ -773,7 +818,7 @@ expire_from_hotspot() {
     return 0
 }
 
-# -- Step 6: clean expired MACs ------------------------------------------------
+# -- Step 5: clean expired MACs ------------------------------------------------
 clean_expired_macs() {
     local now tmp
     now=$(date +%s)
@@ -815,16 +860,19 @@ clean_expired_macs() {
     mv "$tmp" "$MAC_LIST" && chmod 600 "$MAC_LIST"
 }
 
-# -- Step 7: detect new clients in pydhcpd.leases ------------------------------
-# Scans pydhcpd.leases for MACs that aren't yet known to any ACL source
-# (umacauth, mac-*, blockdhcp, ugrace, umacbak) and writes them straight
-# into ugrace.txt with a first-seen timestamp.
+# -- Step 6: detect new clients in pydhcpd.leases ------------------------------
+# Scans pydhcpd.leases for MACs that aren't yet known to any of uhotspotd's own
+# ACL sources (umacauth, blockdhcp, ugrace, umacbak) and writes them straight
+# into ugrace.txt with a first-seen timestamp. Deliberately does not check
+# mac-*.txt (uhotspotd never reads it): a managed device's lease can transiently
+# land here too, but uleases.sh's clean_grace_list already reconciles it back
+# out on the very next reload, since it recognizes mac-*.txt as authoritative.
 #
 # No fixed hotspot-range IP is assigned here and no lease removal is
 # queued -- ugrace clients keep their existing pydhcpd pool lease until they
 # enter a voucher or their grace timer expires (handled by uleases.sh).
 # Writing ugrace.txt is enough to be picked up by the snapshot taken in
-# step 2, so check_and_reload_if_changed (step 12) detects the change and
+# step 2, so check_and_reload_if_changed (step 10) detects the change and
 # triggers SERVER_RELOAD_SCRIPT, which runs uleases.sh to do the actual
 # classification/expiry/blocking of grace entries.
 process_new_leases() {
@@ -857,8 +905,7 @@ process_new_leases() {
                && ! grep -qi "^a;${mac};" "$MAC_LIST" 2>/dev/null \
                && ! grep -qi "^a;${mac};" "$BLOCK_DHCP" 2>/dev/null \
                && ! grep -qi "^a;${mac};" "$grace_file" 2>/dev/null \
-               && ! grep -qxiF "$mac" "$wellknow_file" 2>/dev/null \
-               && ! echo "$MANAGED_MACS" | grep -qi "^${mac}$"; then
+               && ! grep -qxiF "$mac" "$wellknow_file" 2>/dev/null; then
                 echo "a;${mac};${ip};${host};$(date +%s);" >> "$grace_file"
                 log "INFO: New client $mac ip=$ip hostname=$host -> ugrace.txt"
                 (( added++ )) || true
@@ -874,9 +921,14 @@ process_new_leases() {
     fi
 }
 
-# -- Step 8: process sessions --------------------------------------------------
+# -- Step 7: process sessions --------------------------------------------------
 # Queries stat/guest. Promotes voucher-authenticated clients to umacauth.txt.
-# MACs in mac-*.txt are skipped even if they entered a voucher.
+# mac-*.txt devices are never authorized as a UniFi guest by this daemon (see
+# the MANAGED MACS note above), so they never appear here from anything this
+# daemon itself did -- but stat/guest can still report one with a guest
+# authorization from outside this daemon (residual session, manual UniFi
+# authorization, or a voucher redeemed before the device was added to
+# mac-*.txt). is_managed_mac() is the live, on-disk barrier against that.
 process_sessions() {
     local endpoint sessions_data rc added=0
     local now
@@ -893,9 +945,12 @@ process_sessions() {
         [[ -z "$end_time" || "$end_time" == "null" ]] && continue
         (( end_time <= now )) && continue
 
-        if echo "$MANAGED_MACS" | grep -qi "^${mac}$"; then
-            continue
-        fi
+        # No log here, on purpose: uhotspotd.sh does not process mac-*.txt
+        # (see MANAGED MACS note above) and a managed device having a live
+        # UniFi guest authorization is not this daemon's concern to report --
+        # the only mac-*.txt-related log line this daemon ever produces is
+        # the change-watcher's, when the reload is actually invoked.
+        is_managed_mac "$mac" && continue
 
         if grep -qi "^a;${mac};" "$MAC_LIST" 2>/dev/null; then
             local existing_line existing_ip existing_hostname existing_end
@@ -963,7 +1018,7 @@ process_sessions() {
     SESSIONS_AUTHORIZED=$added
 }
 
-# -- Step 9: revoke unauthorized -----------------------------------------------
+# -- Step 8: revoke unauthorized -----------------------------------------------
 revoke_unauthorized() {
     local sta_data="$1"
     local rc
@@ -1019,63 +1074,7 @@ revoke_unauthorized() {
     REVOKED=$revoked
 }
 
-# -- Step 10: authorize managed MACs ------------------------------------------
-# mac-*.txt (mac-unlimited, mac-proxy, etc.) clients now share HOTSPOT_ESSID
-# with portal guests. UniFi's guest portal requires authorize-guest for ANY
-# client on that SSID, regardless of iptables/ACL bypass rules -- those only
-# control routing/NAT, not whether UniFi shows the captive portal.
-#
-# This step scans stat/sta for managed MACs (mac-*.txt) that UniFi currently
-# shows as unauthorized/absent on HOTSPOT_ESSID, and sends authorize-guest
-# with a long duration so they stop seeing the portal. Re-checked every cycle
-# so a MAC that reconnects (and UniFi forgets) gets re-authorized automatically.
-authorize_managed_macs() {
-    local sta_data="$1"
-    [[ -z "$MANAGED_MACS" ]] && return
-    local rc
-    rc=$(echo "$sta_data" | jq -r '.meta.rc // empty' 2>/dev/null || true)
-    [[ "$rc" != "ok" ]] && { log "INFO: stat/sta unavailable -- skipping authorize_managed_macs"; return; }
-
-    local authorized_count=0
-    local mac
-
-    while IFS= read -r mac; do
-        [[ -z "$mac" ]] && continue
-
-        local on_essid authorized
-        on_essid=$(echo "$sta_data" | jq -r \
-            --arg mac "$mac" --arg essid "$HOTSPOT_ESSID" '
-            .data[]
-            | select((.mac | ascii_downcase) == $mac)
-            | select(.essid == $essid)
-            | "yes"
-        ' 2>/dev/null | head -1 || true)
-        [[ "$on_essid" != "yes" ]] && continue
-
-        authorized=$(echo "$sta_data" | jq -r \
-            --arg mac "$mac" '
-            .data[]
-            | select((.mac | ascii_downcase) == $mac)
-            | .authorized // false
-        ' 2>/dev/null | head -1 || true)
-        [[ "$authorized" == "true" ]] && continue
-
-        local auth_url http_code
-        auth_url=$(api_path "cmd/stamgr")
-        http_code=$(api_post "$auth_url" \
-            "{\"cmd\":\"authorize-guest\",\"mac\":\"${mac}\",\"minutes\":${MANAGED_AUTHORIZE_MINUTES}}")
-        if [[ "$http_code" == "200" ]]; then
-            log "INFO: authorize_managed_macs: authorized $mac (managed, minutes=${MANAGED_AUTHORIZE_MINUTES})"
-            (( authorized_count++ )) || true
-        else
-            log "WARNING: authorize_managed_macs: failed to authorize $mac (HTTP $http_code)"
-        fi
-    done <<< "$MANAGED_MACS"
-
-    MANAGED_AUTHORIZED=$authorized_count
-}
-
-# -- Step 11: backup -----------------------------------------------------------
+# -- Step 9: backup -------------------------------------------------------------
 mac_hotspot_backup() {
     local wellknow_file current_macs new_macs merged_macs
     wellknow_file="$(dirname "$MAC_LIST")/umacbak.txt"
@@ -1119,7 +1118,7 @@ snapshot_acls() {
     _ACL_SNAPSHOT_GRACE=$(md5sum "$grace_file" 2>/dev/null | awk '{print $1}' || echo "absent")
 }
 
-# -- Step 12: reload if ACLs changed ------------------------------------------
+# -- Step 10: reload if ACLs changed ------------------------------------------
 # Returns 0 if ACLs changed (reload attempted), 1 if unchanged (silent -- no
 # log noise on the common no-change path). Callers use the return code to
 # decide whether the per-cycle summary line is worth logging.
@@ -1135,6 +1134,15 @@ check_and_reload_if_changed() {
        "$cur_queue" != "$_ACL_SNAPSHOT_QUEUE" || "$cur_grace" != "$_ACL_SNAPSHOT_GRACE" ]] \
         && acl_changed=1
 
+    # mac-*.txt change detected last cycle by check_mac_lists_changed (an
+    # independent watcher, see above) folds into this same single reload
+    # decision -- never a separate ureload.sh invocation of its own.
+    local mac_reload_triggered=0
+    if (( _MAC_RELOAD_PENDING == 1 )); then
+        acl_changed=1
+        mac_reload_triggered=1
+    fi
+
     now=$(date +%s)
     since_last=$(( now - _LAST_RELOAD_EPOCH ))
 
@@ -1147,9 +1155,12 @@ check_and_reload_if_changed() {
         [[ "$cur_block" != "$_ACL_SNAPSHOT_BLOCK" ]] && log "INFO: blockdhcp.txt changed"
         [[ "$cur_queue" != "$_ACL_SNAPSHOT_QUEUE" ]] && log "INFO: lease removal queue changed"
         [[ "$cur_grace" != "$_ACL_SNAPSHOT_GRACE" ]] && log "INFO: ugrace.txt changed"
+        (( mac_reload_triggered )) && log "INFO: mac-*.txt change from previous cycle -- reloading now"
     else
         log "INFO: ${RELOAD_SAFETY_INTERVAL_SECONDS}s since last reload -- forcing safety-net reload"
     fi
+
+    _MAC_RELOAD_PENDING=0
 
     _RELOAD_OK=0
     if [[ -n "${SERVER_RELOAD_SCRIPT:-}" && -x "$SERVER_RELOAD_SCRIPT" ]]; then
@@ -1190,7 +1201,7 @@ check_and_reload_if_changed() {
     return 0
 }
 
-# -- Step 13: kick newly-authorized clients -----------------------------------
+# -- Step 11: kick newly-authorized clients -----------------------------------
 # A MAC that just got a new fixed hotspot IP (as opposed to a voucher renewal,
 # which keeps the existing IP) may still be holding its old pool-range lease
 # on the client side until its own DHCP renewal timer fires. Forcing a
@@ -1203,6 +1214,15 @@ kick_newly_authorized() {
     local mac kick_url http_code on_sta rc
     rc=$(echo "$sta_data" | jq -r '.meta.rc // empty' 2>/dev/null || true)
     for mac in "${NEWLY_AUTHORIZED_MACS[@]}"; do
+        # Defense-in-depth: process_sessions already excludes managed MACs via
+        # is_managed_mac(), so this should never trigger. Logged loudly (not a
+        # silent continue), unlike process_sessions' own routine/high-volume
+        # skip above -- this one firing at all means something upstream let a
+        # managed MAC slip through, which is itself worth surfacing.
+        if is_managed_mac "$mac"; then
+            log "WARNING: kick_newly_authorized: $mac is in mac-*.txt but reached NEWLY_AUTHORIZED_MACS -- not kicking. This should never happen; process_sessions' own guard should have excluded it already."
+            continue
+        fi
         if [[ "$rc" == "ok" ]]; then
             on_sta=$(echo "$sta_data" | jq -r --arg mac "$mac" '
                 .data[] | select((.mac | ascii_downcase) == $mac) | "yes"
@@ -1236,14 +1256,16 @@ run_cycle() {
 
     SESSIONS_AUTHORIZED=0
     REVOKED=0
-    MANAGED_AUTHORIZED=0
     NEWLY_AUTHORIZED_MACS=()
 
     load_all_vouchers
     snapshot_acls
+
+    # Independent of the ACL steps below -- see check_mac_lists_changed.
+    check_mac_lists_changed
+
     dedup_mac_lists
     sort_acl_files
-    clean_managed_macs
     clean_expired_macs
     process_new_leases
 
@@ -1275,7 +1297,6 @@ run_cycle() {
     fi
 
     revoke_unauthorized "$sta_data"
-    authorize_managed_macs "$sta_data"
     mac_hotspot_backup
 
     # Summary line is only useful when something actually changed this cycle --
@@ -1287,7 +1308,7 @@ run_cycle() {
         authorized_total=$(( ${authorized_total:-0} + 0 ))
         grace_total=$(grep -c "^a;" "${ACL_GRACE_FILE:-/etc/uhotspot/acl/ugrace.txt}" 2>/dev/null || true)
         grace_total=$(( ${grace_total:-0} + 0 ))
-        log "STATS: vouchers=$VOUCHER_COUNT | authorized=$authorized_total | grace=$grace_total | new_auth=$SESSIONS_AUTHORIZED | revoked=$REVOKED | managed_authorized=$MANAGED_AUTHORIZED"
+        log "STATS: vouchers=$VOUCHER_COUNT | authorized=$authorized_total | grace=$grace_total | new_auth=$SESSIONS_AUTHORIZED | revoked=$REVOKED"
 
         if [[ "$_RELOAD_OK" == "1" && ${#NEWLY_AUTHORIZED_MACS[@]} -gt 0 ]]; then
             kick_newly_authorized "$sta_data"

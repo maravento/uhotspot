@@ -509,8 +509,8 @@ function rt(q,an){
 function ucs(){
   var bar=document.getElementById('uhCB');
   for(var i=0;i<ALL.length;i++){
-    var m=ALL[i].msg.match(/vouchers=(\d+)\s*\|\s*authorized=(\d+)\s*\|\s*grace=(\d+)\s*\|\s*new_auth=(\d+)\s*\|\s*revoked=(\d+)\s*\|\s*managed_authorized=(\d+)/);
-    if(m){bar.innerHTML='<span class="uh-cp uh-cp-i">Vouchers '+m[1]+'</span><span class="uh-cp uh-cp-ok">Authorized '+m[2]+'</span><span class="uh-cp uh-cp-w">Grace '+m[3]+'</span><span class="uh-cp uh-cp-ok">New Auth '+m[4]+'</span><span class="uh-cp '+(parseInt(m[5])>0?'uh-cp-w':'uh-cp-d')+'">Revoked '+m[5]+'</span><span class="uh-cp uh-cp-d">Managed '+m[6]+'</span>';return}
+    var m=ALL[i].msg.match(/vouchers=(\d+)\s*\|\s*authorized=(\d+)\s*\|\s*grace=(\d+)\s*\|\s*new_auth=(\d+)\s*\|\s*revoked=(\d+)/);
+    if(m){bar.innerHTML='<span class="uh-cp uh-cp-i">Vouchers '+m[1]+'</span><span class="uh-cp uh-cp-ok">Authorized '+m[2]+'</span><span class="uh-cp uh-cp-w">Grace '+m[3]+'</span><span class="uh-cp uh-cp-ok">New Auth '+m[4]+'</span><span class="uh-cp '+(parseInt(m[5])>0?'uh-cp-w':'uh-cp-d')+'">Revoked '+m[5]+'</span>';return}
   }
 }
 

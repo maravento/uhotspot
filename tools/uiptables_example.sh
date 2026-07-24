@@ -517,7 +517,17 @@ create_acl() {
     echo -e "$macs" > "$path_macs"
 }
 if [ -n "$mac2ip" ]; then
-    create_acl $mac2ip
+    # create_acl expects a flat MAC IP MAC IP ... arg list (it shifts two at a
+    # time). $mac2ip is one "mac ip" pair per line, so it must still be split
+    # into individual args -- but building that list explicitly (instead of
+    # relying on bare unquoted word-splitting) avoids any accidental glob
+    # expansion of a token.
+    mac2ip_args=()
+    while IFS=' ' read -r _m2i_mac _m2i_ip; do
+        [[ -n "$_m2i_mac" ]] && mac2ip_args+=("$_m2i_mac")
+        [[ -n "$_m2i_ip" ]] && mac2ip_args+=("$_m2i_ip")
+    done <<< "$mac2ip"
+    create_acl "${mac2ip_args[@]}"
     iptables -t mangle -A PREROUTING -i "$lan" -m set --match-set macip src,src -j ACCEPT
     iptables -t mangle -A PREROUTING -i "$lan" -j DROP
 else
